@@ -51,7 +51,9 @@ func (db *DB) Subscribe(ctx context.Context, topic string, handler common.PubSub
 	// Subscribe to the topic
 	subscription, err := pubsubTopic.Subscribe()
 	if err != nil {
-		pubsubTopic.Close()
+		if closeErr := pubsubTopic.Close(); closeErr != nil {
+			db.infrastructure.logger.Warn("Failed to close topic during cleanup", "topic", topicName, "error", closeErr.Error())
+		}
 		return fmt.Errorf("failed to subscribe to topic %s: %w", topicName, err)
 	}
 
@@ -174,7 +176,9 @@ func (db *DB) Unsubscribe(ctx context.Context, topic string) error {
 
 	// Close the topic if no other subscriptions depend on it
 	if topicSub.topic != nil {
-		topicSub.topic.Close()
+		if closeErr := topicSub.topic.Close(); closeErr != nil {
+			db.infrastructure.logger.Warn("Failed to close topic during unsubscribe", "topic", topic, "error", closeErr.Error())
+		}
 	}
 
 	// Remove from maps
@@ -288,7 +292,9 @@ func (db *DB) Disconnect(ctx context.Context) error {
 	// Close all topics
 	for topic, pubsubTopic := range db.instance.topics {
 		if pubsubTopic != nil {
-			pubsubTopic.Close()
+			if closeErr := pubsubTopic.Close(); closeErr != nil {
+				db.infrastructure.logger.Warn("Failed to close topic during disconnect", "topic", topic, "error", closeErr.Error())
+			}
 		}
 		delete(db.instance.topics, topic)
 	}

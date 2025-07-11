@@ -328,7 +328,7 @@ func (node *SimpleNode) RunCLI() {
 // Disconnect cleans up resources
 func (node *SimpleNode) Disconnect() {
 	if node.db != nil {
-		node.db.Disconnect(context.Background())
+		_ = node.db.Disconnect(context.Background()) // Ignore errors in cleanup
 	}
 }
 

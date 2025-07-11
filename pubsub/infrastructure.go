@@ -68,14 +68,15 @@ var (
 // enableLibp2pDebugLogging enables debug logging for key libp2p subsystems
 func enableLibp2pDebugLogging() {
 	// Set log levels for libp2p subsystems to debug level
-	logging.SetLogLevel("swarm2", "DEBUG")       // Connection management
-	logging.SetLogLevel("dht", "DEBUG")          // DHT operations
-	logging.SetLogLevel("pubsub", "DEBUG")       // GossipSub
-	logging.SetLogLevel("net/identify", "DEBUG") // Peer identification
-	logging.SetLogLevel("basichost", "DEBUG")    // Basic host operations
-	logging.SetLogLevel("autonat", "DEBUG")      // NAT detection
-	logging.SetLogLevel("connmgr", "DEBUG")      // Connection manager
-	logging.SetLogLevel("transport", "DEBUG")    // Transport layer
+	// Ignore errors as these are non-critical debug setup calls
+	_ = logging.SetLogLevel("swarm2", "DEBUG")       // Connection management
+	_ = logging.SetLogLevel("dht", "DEBUG")          // DHT operations
+	_ = logging.SetLogLevel("pubsub", "DEBUG")       // GossipSub
+	_ = logging.SetLogLevel("net/identify", "DEBUG") // Peer identification
+	_ = logging.SetLogLevel("basichost", "DEBUG")    // Basic host operations
+	_ = logging.SetLogLevel("autonat", "DEBUG")      // NAT detection
+	_ = logging.SetLogLevel("connmgr", "DEBUG")      // Connection manager
+	_ = logging.SetLogLevel("transport", "DEBUG")    // Transport layer
 }
 
 // initializeP2PInfrastructure creates the process-level infrastructure (once per process)
@@ -140,7 +141,9 @@ func initializeP2PInfrastructure(config common.Config) (*P2PInfrastructure, erro
 	// Initialize DHT for peer discovery
 	dht, err := dual.New(context.Background(), host)
 	if err != nil {
-		host.Close()
+		if closeErr := host.Close(); closeErr != nil {
+			config.Logger.Warn("Failed to close host during cleanup", "error", closeErr.Error())
+		}
 		return nil, fmt.Errorf("failed to create DHT: %w", err)
 	}
 
@@ -149,7 +152,9 @@ func initializeP2PInfrastructure(config common.Config) (*P2PInfrastructure, erro
 	// Initialize GossipSub for pub/sub messaging
 	gossipSub, err := pubsub.NewGossipSub(context.Background(), host)
 	if err != nil {
-		host.Close()
+		if closeErr := host.Close(); closeErr != nil {
+			config.Logger.Warn("Failed to close host during cleanup", "error", closeErr.Error())
+		}
 		return nil, fmt.Errorf("failed to create GossipSub: %w", err)
 	}
 
