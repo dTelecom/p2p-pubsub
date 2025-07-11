@@ -190,4 +190,23 @@ type Config struct {
 ## Network Ports
 
 - **QUIC**: 4001 (default, primary transport)
-- **TCP**: 4002 (default, fallback transport) 
+- **TCP**: 4002 (default, fallback transport)
+
+## 🚀 Simple Node Example
+
+Want to see the library in action? Check out our complete example:
+
+```bash
+cd examples/simple-node
+./test-demo.sh
+```
+
+This will generate keypairs and show you how to run two nodes that can communicate with each other via P2P pub/sub. The example includes:
+
+- 📋 **Interactive CLI** for subscribe/publish/unsubscribe operations
+- 🔔 **Real-time message notifications** with pretty printing
+- 👥 **Peer management** and status monitoring  
+- 🔐 **Mock authorization** that demonstrates registry integration
+- 📡 **Bootstrap discovery** for automatic peer finding
+
+See [`examples/simple-node/README.md`](examples/simple-node/README.md) for detailed instructions and usage examples. 
