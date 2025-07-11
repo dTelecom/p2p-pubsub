@@ -1,6 +1,9 @@
 package common
 
-import "log/slog"
+import (
+	"context"
+	"log/slog"
+)
 
 // slogLogger implements the Logger interface using Go's standard slog package
 type slogLogger struct {
@@ -26,4 +29,8 @@ func (l *slogLogger) Warn(msg string, keysAndValues ...interface{}) {
 
 func (l *slogLogger) Error(msg string, keysAndValues ...interface{}) {
 	l.logger.Error(msg, keysAndValues...)
+}
+
+func (l *slogLogger) DebugEnabled() bool {
+	return l.logger.Enabled(context.Background(), slog.LevelDebug)
 }

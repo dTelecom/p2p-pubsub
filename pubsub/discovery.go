@@ -53,7 +53,12 @@ func (ds *DiscoveryService) StartDiscovery(ctx context.Context, databaseName str
 
 // advertiseLoop periodically advertises this node to the network
 func (ds *DiscoveryService) advertiseLoop(ctx context.Context, rendezvous string) {
-	ticker := time.NewTicker(30 * time.Second)
+	// Immediate advertisement on startup
+	util.Advertise(ctx, ds.discovery, rendezvous)
+	ds.logger.Debug("Initial advertisement on rendezvous", "rendezvous", rendezvous)
+
+	// Continue with periodic advertisements (fast interval for quick connectivity)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -71,7 +76,16 @@ func (ds *DiscoveryService) advertiseLoop(ctx context.Context, rendezvous string
 
 // findPeersLoop periodically searches for peers
 func (ds *DiscoveryService) findPeersLoop(ctx context.Context, rendezvous string) {
-	ticker := time.NewTicker(60 * time.Second)
+	// Immediate peer discovery on startup
+	peers, err := util.FindPeers(ctx, ds.discovery, rendezvous)
+	if err != nil {
+		ds.logger.Debug("Initial peer discovery failed", "rendezvous", rendezvous, "error", err.Error())
+	} else {
+		go ds.processPeers(ctx, peers, rendezvous)
+	}
+
+	// Continue with periodic peer discovery (fast interval for quick connectivity)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {

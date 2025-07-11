@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dtelecom/p2p-pubsub/common"
+	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p-kad-dht/dual"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -64,8 +65,27 @@ var (
 	globalInfraMutex      sync.RWMutex
 )
 
+// enableLibp2pDebugLogging enables debug logging for key libp2p subsystems
+func enableLibp2pDebugLogging() {
+	// Set log levels for libp2p subsystems to debug level
+	logging.SetLogLevel("swarm2", "DEBUG")       // Connection management
+	logging.SetLogLevel("dht", "DEBUG")          // DHT operations
+	logging.SetLogLevel("pubsub", "DEBUG")       // GossipSub
+	logging.SetLogLevel("net/identify", "DEBUG") // Peer identification
+	logging.SetLogLevel("basichost", "DEBUG")    // Basic host operations
+	logging.SetLogLevel("autonat", "DEBUG")      // NAT detection
+	logging.SetLogLevel("connmgr", "DEBUG")      // Connection manager
+	logging.SetLogLevel("transport", "DEBUG")    // Transport layer
+}
+
 // initializeP2PInfrastructure creates the process-level infrastructure (once per process)
 func initializeP2PInfrastructure(config common.Config) (*P2PInfrastructure, error) {
+	// Enable debug logging for libp2p components only if user's logger has debug enabled
+	if config.Logger.DebugEnabled() {
+		enableLibp2pDebugLogging()
+		config.Logger.Debug("Enabled libp2p debug logging")
+	}
+
 	// Create identity from Solana private key
 	privateKey, peerID, err := common.CreateIdentityFromSolanaKey(config.WalletPrivateKey)
 	if err != nil {
@@ -88,6 +108,11 @@ func initializeP2PInfrastructure(config common.Config) (*P2PInfrastructure, erro
 	// Create registry-based connection gater
 	gater := common.NewSolanaRegistryGater(config.GetAuthorizedWallets, config.Logger)
 
+	config.Logger.Info("Creating libp2p host",
+		"quic_port", config.ListenPorts.QUIC,
+		"tcp_port", config.ListenPorts.TCP,
+		"peer_id", peerID.String())
+
 	// Create libp2p host with all transports
 	host, err := libp2p.New(
 		libp2p.Identity(privateKey),
@@ -104,7 +129,8 @@ func initializeP2PInfrastructure(config common.Config) (*P2PInfrastructure, erro
 		libp2p.EnableNATService(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
+		return nil, fmt.Errorf("failed to create libp2p host (ports QUIC:%d TCP:%d may be in use): %w",
+			config.ListenPorts.QUIC, config.ListenPorts.TCP, err)
 	}
 
 	config.Logger.Info("Created libp2p host",
@@ -136,6 +162,9 @@ func initializeP2PInfrastructure(config common.Config) (*P2PInfrastructure, erro
 	if err := bootstrapNetwork(context.Background(), host, dht, config.GetBootstrapNodes, config.Logger); err != nil {
 		config.Logger.Warn("Failed to bootstrap network", "error", err.Error())
 		// Don't fail completely, continue without bootstrap
+	} else {
+		// Give DHT a moment to settle after bootstrap
+		time.Sleep(1 * time.Second)
 	}
 
 	return &P2PInfrastructure{
@@ -266,6 +295,14 @@ func createDatabaseInstance(infra *P2PInfrastructure, config common.Config) (*DB
 	config.Logger.Info("Created database instance",
 		"database_name", config.DatabaseName,
 		"peer_id", infra.host.ID().String())
+
+	// Start discovery immediately for this database
+	ctx := context.Background()
+	if err := infra.discovery.StartDiscovery(ctx, config.DatabaseName); err != nil {
+		config.Logger.Warn("Failed to start discovery", "error", err.Error())
+	} else {
+		config.Logger.Info("Started peer discovery for database", "database", config.DatabaseName)
+	}
 
 	return &DB{
 		infrastructure: infra,

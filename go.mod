@@ -11,6 +11,8 @@ require (
 	github.com/multiformats/go-multiaddr v0.16.0 // Multiaddress support
 )
 
+require github.com/ipfs/go-log/v2 v2.6.0
+
 require (
 	filippo.io/edwards25519 v1.0.0-rc.1 // indirect
 	github.com/Jorropo/jsync v1.0.1 // indirect
@@ -39,7 +41,6 @@ require (
 	github.com/ipfs/boxo v0.30.0 // indirect
 	github.com/ipfs/go-cid v0.5.0 // indirect
 	github.com/ipfs/go-datastore v0.8.2 // indirect
-	github.com/ipfs/go-log/v2 v2.6.0 // indirect
 	github.com/ipld/go-ipld-prime v0.21.0 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
 	github.com/jbenet/go-temp-err-catcher v0.1.0 // indirect

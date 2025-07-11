@@ -69,13 +69,6 @@ func (db *DB) Subscribe(ctx context.Context, topic string, handler common.PubSub
 	// Store the subscription
 	db.instance.subscriptions[topic] = topicSub
 
-	// Start discovery for this database if it's the first topic
-	if len(db.instance.subscriptions) == 1 {
-		if err := db.infrastructure.discovery.StartDiscovery(ctx, db.instance.name); err != nil {
-			db.infrastructure.logger.Warn("Failed to start discovery", "error", err.Error())
-		}
-	}
-
 	// Start message listener goroutine
 	go db.messageListener(listenerCtx, topicSub, topicName)
 

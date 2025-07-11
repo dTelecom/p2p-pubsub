@@ -67,6 +67,7 @@ coverage.html
 # Compiled binary
 p2p-node
 cmd/p2p-node/p2p-node
+simple-node
 
 # Local test data
 test-data/

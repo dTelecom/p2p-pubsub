@@ -345,6 +345,7 @@ func main() {
 		bootstrapKey   = flag.String("bootstrap-key", "", "Bootstrap node public key")
 		authorizedKeys = flag.String("authorized-keys", "", "Comma-separated list of authorized public keys")
 		generateKey    = flag.Bool("generate-key", false, "Generate a new keypair and exit")
+		debug          = flag.Bool("debug", false, "Enable debug logging")
 	)
 	flag.Parse()
 
@@ -364,9 +365,16 @@ func main() {
 	}
 
 	// Create logger
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
+	var logger *slog.Logger
+	if *debug {
+		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			Level: slog.LevelDebug, // Enable debug logs to see libp2p internals
+		}))
+	} else {
+		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			Level: slog.LevelInfo, // Default to info level
+		}))
+	}
 	pubsubLogger := common.NewSlogLogger(logger)
 
 	// Parse authorized keys

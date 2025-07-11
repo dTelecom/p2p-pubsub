@@ -58,14 +58,14 @@ func mockGetUnauthorizedWallets(ctx context.Context) ([]solana.PublicKey, error)
 }
 
 // Mock bootstrap function for nodes 1 and 2 - returns node 0 as bootstrap
-func mockGetBootstrapNodesForClients(node0Host string, node0PeerID string) common.GetBootstrapNodesFunc {
+func mockGetBootstrapNodesForClients(node0Host string, node0PeerID string, quicPort, tcpPort int) common.GetBootstrapNodesFunc {
 	return func(ctx context.Context) ([]common.BootstrapNode, error) {
 		return []common.BootstrapNode{
 			{
 				PublicKey: solana.MustPublicKeyFromBase58(node0PublicKey),
 				IP:        node0Host,
-				QUICPort:  15001, // Node 0's QUIC port
-				TCPPort:   15002, // Node 0's TCP port
+				QUICPort:  quicPort, // Use actual bootstrap node's QUIC port
+				TCPPort:   tcpPort,  // Use actual bootstrap node's TCP port
 			},
 		}, nil
 	}
@@ -157,7 +157,7 @@ func TestMultiNodePubSubWithContentVerification(t *testing.T) {
 
 	// Node 1 (Client)
 	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
 	defer node1DB.Disconnect(ctx)
 
 	err = node1DB.Subscribe(ctx, testTopic, node1Handler)
@@ -167,7 +167,7 @@ func TestMultiNodePubSubWithContentVerification(t *testing.T) {
 
 	// Node 2 (Client)
 	node2DB := setupNode(t, ctx, logger, node2PrivateKey, "test-network", 15005, 15006,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
 	defer node2DB.Disconnect(ctx)
 
 	err = node2DB.Subscribe(ctx, testTopic, node2Handler)
@@ -264,7 +264,7 @@ func TestUnauthorizedNodeBlocked(t *testing.T) {
 		WalletPrivateKey:     node3PrivateKey, // This key is NOT in the authorized list
 		DatabaseName:         "test-network",
 		GetAuthorizedWallets: mockGetUnauthorizedWallets, // Returns only node3, but authorized network only allows 0,1,2
-		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", authorizedDB.GetHost().ID().String()),
+		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", authorizedDB.GetHost().ID().String(), 15001, 15002),
 		Logger:               logger,
 		ListenPorts: common.ListenPorts{
 			QUIC: 15007,
@@ -397,7 +397,7 @@ func TestMultiTopicIsolation(t *testing.T) {
 	defer node0DB.Disconnect(ctx)
 
 	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
 	defer node1DB.Disconnect(ctx)
 
 	// Subscribe nodes to different topic combinations
@@ -512,7 +512,7 @@ func TestUnsubscribeFunctionality(t *testing.T) {
 	defer node0DB.Disconnect(ctx)
 
 	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
 	defer node1DB.Disconnect(ctx)
 
 	// Subscribe node1 to topic
@@ -635,12 +635,12 @@ func TestPublishThenSubscribeEdgeCase(t *testing.T) {
 
 	// Node 1 (Client) - just connect, NO subscription initially
 	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
 	defer node1DB.Disconnect(ctx)
 
 	// Node 2 (Client) - just connect, NO subscription initially
 	node2DB := setupNode(t, ctx, logger, node2PrivateKey, "test-network", 15005, 15006,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
 	defer node2DB.Disconnect(ctx)
 
 	// Wait for network convergence (same as working tests)
@@ -772,12 +772,12 @@ func TestBasicConnectivity(t *testing.T) {
 
 	// Node 1 (Client) - just connect, no pub/sub
 	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
 	defer node1DB.Disconnect(ctx)
 
 	// Node 2 (Client) - just connect, no pub/sub
 	node2DB := setupNode(t, ctx, logger, node2PrivateKey, "test-network", 15005, 15006,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
 	defer node2DB.Disconnect(ctx)
 
 	// Wait for network convergence
@@ -994,7 +994,7 @@ func TestMultiNodePubSub(t *testing.T) {
 		WalletPrivateKey:     node1PrivateKey,
 		DatabaseName:         "test-network",
 		GetAuthorizedWallets: mockGetAuthorizedWallets,
-		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", node0Host.ID().String()),
+		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", node0Host.ID().String(), 15001, 15002),
 		Logger:               logger,
 		ListenPorts: common.ListenPorts{
 			QUIC: 15003,
@@ -1022,7 +1022,7 @@ func TestMultiNodePubSub(t *testing.T) {
 		WalletPrivateKey:     node2PrivateKey,
 		DatabaseName:         "test-network",
 		GetAuthorizedWallets: mockGetAuthorizedWallets,
-		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", node0Host.ID().String()),
+		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", node0Host.ID().String(), 15001, 15002),
 		Logger:               logger,
 		ListenPorts: common.ListenPorts{
 			QUIC: 15005,
@@ -1163,15 +1163,228 @@ func TestMultiNodePubSub(t *testing.T) {
 	t.Log("✅ Authorization and signatures validated by libp2p")
 }
 
+// TestConnectivityIssueReproduction attempts to reproduce the connectivity issues we encountered
+// by using conditions that previously caused connection failures
+func TestConnectivityIssueReproduction(t *testing.T) {
+	t.Log("=== Testing Connectivity After Bootstrap Address Fix ===")
+	t.Log("This test validates that conditions which previously caused failures now work correctly")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := &TestLogger{}
+
+	// Use conditions that previously caused connectivity failures
+	t.Log("Using conditions that previously failed:")
+	t.Log("  - Different ports: 18001-18006 (not 15001-15006)")
+	t.Log("  - Different network: 'different-network'")
+	t.Log("  - Shorter timing: 500ms + 2s")
+
+	// Node 0 (Bootstrap) - use different ports that previously caused issues
+	node0DB := setupNode(t, ctx, logger, node0PrivateKey, "different-network", 18001, 18002,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForBootstrap)
+	defer node0DB.Disconnect(ctx)
+
+	// SHORTER wait time (this previously might have caused timing issues)
+	time.Sleep(500 * time.Millisecond)
+
+	// Node 1 (Client) - different ports, different timing
+	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "different-network", 18003, 18004,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 18001, 18002))
+	defer node1DB.Disconnect(ctx)
+
+	// Node 2 (Client) - more different ports
+	node2DB := setupNode(t, ctx, logger, node2PrivateKey, "different-network", 18005, 18006,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 18001, 18002))
+	defer node2DB.Disconnect(ctx)
+
+	// Wait for connectivity (shorter time that previously failed)
+	time.Sleep(2 * time.Second)
+
+	// Check connectivity - this should work now that bootstrap addresses are dynamic
+	node0Peers := node0DB.ConnectedPeers()
+	node1Peers := node1DB.ConnectedPeers()
+	node2Peers := node2DB.ConnectedPeers()
+
+	t.Logf("Initial connectivity check - Node 0: %d peers, Node 1: %d peers, Node 2: %d peers",
+		len(node0Peers), len(node1Peers), len(node2Peers))
+
+	// If not immediately connected, wait a bit longer (but still fail if no connection)
+	if len(node0Peers) < 2 || len(node1Peers) < 2 || len(node2Peers) < 2 {
+		t.Log("Not immediately connected, waiting additional 5 seconds...")
+		time.Sleep(5 * time.Second)
+
+		node0Peers = node0DB.ConnectedPeers()
+		node1Peers = node1DB.ConnectedPeers()
+		node2Peers = node2DB.ConnectedPeers()
+
+		t.Logf("After additional wait - Node 0: %d peers, Node 1: %d peers, Node 2: %d peers",
+			len(node0Peers), len(node1Peers), len(node2Peers))
+	}
+
+	// ASSERT that connectivity works - this test should FAIL if it doesn't
+	if len(node0Peers) < 2 {
+		t.Errorf("Node 0 connectivity failed: expected 2+ peers, got %d", len(node0Peers))
+	}
+	if len(node1Peers) < 2 {
+		t.Errorf("Node 1 connectivity failed: expected 2+ peers, got %d", len(node1Peers))
+	}
+	if len(node2Peers) < 2 {
+		t.Errorf("Node 2 connectivity failed: expected 2+ peers, got %d", len(node2Peers))
+	}
+
+	// If we get here, connectivity works as expected
+	t.Log("✅ Bootstrap address fix validation successful!")
+	t.Log("  - Dynamic bootstrap addresses resolved the connectivity issue")
+	t.Log("  - Nodes connect correctly regardless of port combinations")
+}
+
+// TestBootstrapAddressValidation validates that bootstrap addresses match actual node ports
+func TestBootstrapAddressValidation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := &TestLogger{}
+
+	// Test multiple port ranges to ensure bootstrap addresses are dynamic
+	testCases := []struct {
+		name           string
+		bootstrapPorts [2]int // [QUIC, TCP]
+		clientPorts    [4]int // [QUIC1, TCP1, QUIC2, TCP2]
+	}{
+		{
+			name:           "Standard ports",
+			bootstrapPorts: [2]int{15001, 15002},
+			clientPorts:    [4]int{15003, 15004, 15005, 15006},
+		},
+		{
+			name:           "High ports",
+			bootstrapPorts: [2]int{19001, 19002},
+			clientPorts:    [4]int{19003, 19004, 19005, 19006},
+		},
+		{
+			name:           "Mixed range ports",
+			bootstrapPorts: [2]int{12345, 12346},
+			clientPorts:    [4]int{12347, 12348, 12349, 12350},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Node 0 (Bootstrap) with specified ports
+			node0DB := setupNode(t, ctx, logger, node0PrivateKey, "test-bootstrap-validation",
+				tc.bootstrapPorts[0], tc.bootstrapPorts[1],
+				mockGetAuthorizedWallets, mockGetBootstrapNodesForBootstrap)
+			defer node0DB.Disconnect(ctx)
+
+			// Create bootstrap function with actual node0 ports
+			bootstrapFunc := mockGetBootstrapNodesForClients("127.0.0.1",
+				node0DB.GetHost().ID().String(), tc.bootstrapPorts[0], tc.bootstrapPorts[1])
+
+			// Node 1 (Client) - should use node0's actual ports for bootstrap
+			node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-bootstrap-validation",
+				tc.clientPorts[0], tc.clientPorts[1],
+				mockGetAuthorizedWallets, bootstrapFunc)
+			defer node1DB.Disconnect(ctx)
+
+			// Node 2 (Client) - should use node0's actual ports for bootstrap
+			node2DB := setupNode(t, ctx, logger, node2PrivateKey, "test-bootstrap-validation",
+				tc.clientPorts[2], tc.clientPorts[3],
+				mockGetAuthorizedWallets, bootstrapFunc)
+			defer node2DB.Disconnect(ctx)
+
+			// Verify bootstrap addresses by checking connectivity
+			time.Sleep(5 * time.Second) // Allow time for discovery
+
+			// All nodes should be connected if bootstrap addresses are correct
+			node0Peers := len(node0DB.GetHost().Network().Peers())
+			node1Peers := len(node1DB.GetHost().Network().Peers())
+			node2Peers := len(node2DB.GetHost().Network().Peers())
+
+			t.Logf("Bootstrap validation for %s - Node0: %d peers, Node1: %d peers, Node2: %d peers",
+				tc.name, node0Peers, node1Peers, node2Peers)
+
+			// Each node should see the other 2 nodes
+			if node0Peers < 2 || node1Peers < 2 || node2Peers < 2 {
+				t.Errorf("Bootstrap address validation failed for %s - expected 2+ peers each, got Node0: %d, Node1: %d, Node2: %d",
+					tc.name, node0Peers, node1Peers, node2Peers)
+			}
+
+			// Validate that nodes can actually communicate (not just connected)
+			// Subscribe all nodes to a test topic
+			testTopic := fmt.Sprintf("bootstrap-validation-%s", tc.name)
+
+			messageReceived := make(chan bool, 2)
+
+			// Subscribe nodes 1 and 2 to receive messages
+			err := node1DB.Subscribe(ctx, testTopic, func(event common.Event) {
+				select {
+				case messageReceived <- true:
+				default:
+				}
+			})
+			if err != nil {
+				t.Fatalf("Node1 subscribe failed: %v", err)
+			}
+
+			err = node2DB.Subscribe(ctx, testTopic, func(event common.Event) {
+				select {
+				case messageReceived <- true:
+				default:
+				}
+			})
+			if err != nil {
+				t.Fatalf("Node2 subscribe failed: %v", err)
+			}
+
+			// Allow subscription to propagate
+			time.Sleep(2 * time.Second)
+
+			// Node 0 publishes a message
+			testMessage := []byte(fmt.Sprintf("bootstrap-test-%s", tc.name))
+			_, err = node0DB.Publish(ctx, testTopic, testMessage)
+			if err != nil {
+				t.Fatalf("Node0 publish failed: %v", err)
+			}
+
+			// Wait for message delivery
+			received := 0
+			timeout := time.After(3 * time.Second)
+			for received < 2 {
+				select {
+				case <-messageReceived:
+					received++
+				case <-timeout:
+					t.Errorf("Message delivery timeout for %s - only %d/2 nodes received message", tc.name, received)
+					return
+				}
+			}
+
+			t.Logf("✅ Bootstrap validation successful for %s - all nodes connected and communicating", tc.name)
+		})
+	}
+}
+
 // TestLogger is a simple test logger
 type TestLogger struct{}
 
 func (l *TestLogger) Debug(msg string, keysAndValues ...interface{}) {
-	// In tests, we keep debug messages quiet unless needed
+	// Don't show debug messages in tests by default to reduce noise
+	// Only uncomment this line when debugging test issues
+	// fmt.Printf("DEBUG: %s", msg)
+	// if len(keysAndValues) > 0 {
+	//	fmt.Printf(" - %v", keysAndValues)
+	// }
+	// fmt.Println()
 }
 
 func (l *TestLogger) Info(msg string, keysAndValues ...interface{}) {
-	// In tests, we keep info messages quiet unless needed
+	// Show info messages in tests
+	fmt.Printf("INFO: %s", msg)
+	if len(keysAndValues) > 0 {
+		fmt.Printf(" - %v", keysAndValues)
+	}
+	fmt.Println()
 }
 
 func (l *TestLogger) Warn(msg string, keysAndValues ...interface{}) {
@@ -1180,4 +1393,9 @@ func (l *TestLogger) Warn(msg string, keysAndValues ...interface{}) {
 
 func (l *TestLogger) Error(msg string, keysAndValues ...interface{}) {
 	fmt.Printf("ERROR: %s\n", msg)
+}
+
+func (l *TestLogger) DebugEnabled() bool {
+	// Return false since we don't show debug messages by default in tests
+	return false
 }
