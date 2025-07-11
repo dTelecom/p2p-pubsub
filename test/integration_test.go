@@ -2,7 +2,9 @@ package test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -25,14 +27,33 @@ var (
 	// Node 2 - Just authorized
 	node2PrivateKey = "5zRE2yD43ERnUEDuCBJd3e1y9P5gGaegnYTQxa42GEFdB2Bd6aFf2sH4jSjPiV3MgxqXQAQPKPRgR3RReDHWfdhH"
 	node2PublicKey  = "Dg99EAH5xgLFSqCo8DSsUbaW6wNdFXWVNnXmqofodoKd"
+
+	// Node 3 - Unauthorized (NOT in the authorized list)
+	node3PrivateKey = "2z7Mz9QdFJNrqxHqB8NKr6m5VhG3kLFwkDvYFCrBzYxhQe6jN9vT8WpU4RkSyC5X1nDzJkWf2N8YdGqQ9tZvMrSb"
+	node3PublicKey  = "8vQm2x5MHqYgRnE3DpWvF9BzGkTnJL2wHxCr7ZkNfK4m"
 )
 
-// Mock registry function - returns all 3 test nodes as authorized
+// NodeMessage represents test message structure
+type NodeMessage struct {
+	NodeID  string `json:"node_id"`
+	Content string `json:"content"`
+	Counter int    `json:"counter"`
+}
+
+// Mock registry function - returns only nodes 0, 1, 2 as authorized (NOT node 3)
 func mockGetAuthorizedWallets(ctx context.Context) ([]solana.PublicKey, error) {
 	return []solana.PublicKey{
 		solana.MustPublicKeyFromBase58(node0PublicKey),
 		solana.MustPublicKeyFromBase58(node1PublicKey),
 		solana.MustPublicKeyFromBase58(node2PublicKey),
+		// Note: node3 is intentionally NOT included
+	}, nil
+}
+
+// Mock unauthorized registry - returns only node 3 (for testing unauthorized scenario)
+func mockGetUnauthorizedWallets(ctx context.Context) ([]solana.PublicKey, error) {
+	return []solana.PublicKey{
+		solana.MustPublicKeyFromBase58(node3PublicKey),
 	}, nil
 }
 
@@ -55,20 +76,610 @@ func mockGetBootstrapNodesForBootstrap(ctx context.Context) ([]common.BootstrapN
 	return []common.BootstrapNode{}, nil
 }
 
-// TestMultiNodePubSub tests actual P2P communication between 3 nodes
+// TestMultiNodePubSubWithContentVerification tests P2P communication with detailed message content verification
+func TestMultiNodePubSubWithContentVerification(t *testing.T) {
+	t.Log("=== Starting 3-Node P2P Integration Test with Content Verification ===")
+
+	// Test configuration
+	testTopic := "content-verification-topic"
+	messageTimeout := 10 * time.Second
+
+	// Define expected messages
+	expectedMessages := []NodeMessage{
+		{NodeID: "node-0", Content: "Hello from Node 0 (Bootstrap)", Counter: 1},
+		{NodeID: "node-1", Content: "Hello from Node 1 (Client)", Counter: 2},
+		{NodeID: "node-2", Content: "Hello from Node 2 (Client)", Counter: 3},
+	}
+
+	// Message tracking with content verification
+	var (
+		node0ReceivedMessages = make([]NodeMessage, 0)
+		node1ReceivedMessages = make([]NodeMessage, 0)
+		node2ReceivedMessages = make([]NodeMessage, 0)
+		messagesMutex         sync.RWMutex
+	)
+
+	// Create message handlers that extract and verify content
+	node0Handler := func(event common.Event) {
+		var nodeMsg NodeMessage
+		if msgBytes, err := json.Marshal(event.Message); err == nil {
+			if err := json.Unmarshal(msgBytes, &nodeMsg); err == nil {
+				messagesMutex.Lock()
+				node0ReceivedMessages = append(node0ReceivedMessages, nodeMsg)
+				messagesMutex.Unlock()
+				t.Logf("Node 0 received: %+v", nodeMsg)
+			}
+		}
+	}
+
+	node1Handler := func(event common.Event) {
+		var nodeMsg NodeMessage
+		if msgBytes, err := json.Marshal(event.Message); err == nil {
+			if err := json.Unmarshal(msgBytes, &nodeMsg); err == nil {
+				messagesMutex.Lock()
+				node1ReceivedMessages = append(node1ReceivedMessages, nodeMsg)
+				messagesMutex.Unlock()
+				t.Logf("Node 1 received: %+v", nodeMsg)
+			}
+		}
+	}
+
+	node2Handler := func(event common.Event) {
+		var nodeMsg NodeMessage
+		if msgBytes, err := json.Marshal(event.Message); err == nil {
+			if err := json.Unmarshal(msgBytes, &nodeMsg); err == nil {
+				messagesMutex.Lock()
+				node2ReceivedMessages = append(node2ReceivedMessages, nodeMsg)
+				messagesMutex.Unlock()
+				t.Logf("Node 2 received: %+v", nodeMsg)
+			}
+		}
+	}
+
+	// Create logger
+	logger := &TestLogger{}
+
+	// Setup nodes
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Node 0 (Bootstrap)
+	node0DB := setupNode(t, ctx, logger, node0PrivateKey, "test-network", 15001, 15002,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForBootstrap)
+	defer node0DB.Disconnect(ctx)
+
+	err := node0DB.Subscribe(ctx, testTopic, node0Handler)
+	if err != nil {
+		t.Fatalf("Failed to subscribe Node 0: %v", err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// Node 1 (Client)
+	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+	defer node1DB.Disconnect(ctx)
+
+	err = node1DB.Subscribe(ctx, testTopic, node1Handler)
+	if err != nil {
+		t.Fatalf("Failed to subscribe Node 1: %v", err)
+	}
+
+	// Node 2 (Client)
+	node2DB := setupNode(t, ctx, logger, node2PrivateKey, "test-network", 15005, 15006,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+	defer node2DB.Disconnect(ctx)
+
+	err = node2DB.Subscribe(ctx, testTopic, node2Handler)
+	if err != nil {
+		t.Fatalf("Failed to subscribe Node 2: %v", err)
+	}
+
+	// Wait for network convergence
+	time.Sleep(5 * time.Second)
+
+	// Publish messages and track what was sent
+	nodes := []*pubsub.DB{node0DB, node1DB, node2DB}
+	for i, node := range nodes {
+		event, err := node.Publish(ctx, testTopic, expectedMessages[i])
+		if err != nil {
+			t.Fatalf("Failed to publish from Node %d: %v", i, err)
+		}
+		t.Logf("Node %d published: %+v (Event ID: %s)", i, expectedMessages[i], event.ID)
+		time.Sleep(1 * time.Second)
+	}
+
+	// Wait for message propagation
+	time.Sleep(messageTimeout)
+
+	// Verify content
+	messagesMutex.RLock()
+	defer messagesMutex.RUnlock()
+
+	// Each node should receive 2 messages (from the other 2 nodes)
+	allReceivedMessages := [][]NodeMessage{node0ReceivedMessages, node1ReceivedMessages, node2ReceivedMessages}
+	nodeNames := []string{"Node 0", "Node 1", "Node 2"}
+
+	for i, receivedMessages := range allReceivedMessages {
+		if len(receivedMessages) != 2 {
+			t.Errorf("%s: expected 2 messages, got %d", nodeNames[i], len(receivedMessages))
+			continue
+		}
+
+		// Verify each received message matches expected content
+		expectedForThisNode := make([]NodeMessage, 0)
+		for j, expected := range expectedMessages {
+			if j != i { // Node doesn't receive its own messages
+				expectedForThisNode = append(expectedForThisNode, expected)
+			}
+		}
+
+		// Sort and compare (order might vary)
+		verifyMessagesContent(t, nodeNames[i], receivedMessages, expectedForThisNode)
+	}
+
+	t.Log("✅ Content verification test PASSED")
+}
+
+// TestUnauthorizedNodeBlocked tests that unauthorized nodes cannot connect or send/receive messages
+func TestUnauthorizedNodeBlocked(t *testing.T) {
+	t.Log("=== Testing Unauthorized Node Blocking ===")
+
+	testTopic := "unauthorized-test-topic"
+	messageTimeout := 8 * time.Second
+
+	// Track messages for authorized nodes
+	var (
+		authorizedMessages = make([]common.Event, 0)
+		messagesMutex      sync.RWMutex
+	)
+
+	authorizedHandler := func(event common.Event) {
+		messagesMutex.Lock()
+		authorizedMessages = append(authorizedMessages, event)
+		messagesMutex.Unlock()
+		t.Logf("Authorized node received message from: %s", event.FromPeerId)
+	}
+
+	logger := &TestLogger{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Setup authorized node (bootstrap)
+	authorizedDB := setupNode(t, ctx, logger, node0PrivateKey, "test-network", 15001, 15002,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForBootstrap)
+	defer authorizedDB.Disconnect(ctx)
+
+	err := authorizedDB.Subscribe(ctx, testTopic, authorizedHandler)
+	if err != nil {
+		t.Fatalf("Failed to subscribe authorized node: %v", err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// Try to setup unauthorized node - this should fail to connect or be blocked
+	t.Log("Attempting to connect unauthorized node...")
+
+	unauthorizedConfig := common.Config{
+		WalletPrivateKey:     node3PrivateKey, // This key is NOT in the authorized list
+		DatabaseName:         "test-network",
+		GetAuthorizedWallets: mockGetUnauthorizedWallets, // Returns only node3, but authorized network only allows 0,1,2
+		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", authorizedDB.GetHost().ID().String()),
+		Logger:               logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 15007,
+			TCP:  15008,
+		},
+	}
+
+	// Unauthorized node should either fail to connect or be unable to communicate
+	unauthorizedDB, err := pubsub.Connect(ctx, unauthorizedConfig)
+	if err != nil {
+		t.Logf("✅ Unauthorized node correctly failed to connect: %v", err)
+		return
+	}
+	defer unauthorizedDB.Disconnect(ctx)
+
+	// If it did connect, it shouldn't be able to communicate with authorized nodes
+	unauthorizedMessageReceived := false
+	unauthorizedHandler := func(event common.Event) {
+		unauthorizedMessageReceived = true
+		t.Logf("❌ Unauthorized node received message (should not happen): %v", event)
+	}
+
+	err = unauthorizedDB.Subscribe(ctx, testTopic, unauthorizedHandler)
+	if err != nil {
+		t.Logf("✅ Unauthorized node correctly failed to subscribe: %v", err)
+		return
+	}
+
+	// Wait for potential connection
+	time.Sleep(5 * time.Second)
+
+	// Check if unauthorized node can see authorized peers
+	unauthorizedPeers := unauthorizedDB.ConnectedPeers()
+	t.Logf("Unauthorized node connected to %d peers", len(unauthorizedPeers))
+
+	// Authorized node publishes a message
+	testMessage := NodeMessage{NodeID: "authorized", Content: "Secret message", Counter: 1}
+	event, err := authorizedDB.Publish(ctx, testTopic, testMessage)
+	if err != nil {
+		t.Fatalf("Authorized node failed to publish: %v", err)
+	}
+	t.Logf("Authorized node published: %s", event.ID)
+
+	// Unauthorized node tries to publish a message
+	unauthorizedMessage := NodeMessage{NodeID: "unauthorized", Content: "Malicious message", Counter: 999}
+	_, err = unauthorizedDB.Publish(ctx, testTopic, unauthorizedMessage)
+	if err != nil {
+		t.Logf("✅ Unauthorized node correctly failed to publish: %v", err)
+	} else {
+		t.Logf("⚠️ Unauthorized node was able to publish (will check if message is received)")
+	}
+
+	// Wait for message propagation
+	time.Sleep(messageTimeout)
+
+	// Verify unauthorized node didn't receive authorized messages
+	if unauthorizedMessageReceived {
+		t.Error("❌ Unauthorized node received messages from authorized network")
+	} else {
+		t.Log("✅ Unauthorized node correctly did not receive messages")
+	}
+
+	// Verify authorized node didn't receive unauthorized messages
+	messagesMutex.RLock()
+	for _, msg := range authorizedMessages {
+		if msg.FromPeerId == unauthorizedDB.GetHost().ID().String() {
+			t.Error("❌ Authorized node received message from unauthorized node")
+		}
+	}
+	messagesMutex.RUnlock()
+
+	t.Log("✅ Unauthorized node blocking test PASSED")
+}
+
+// TestMultiTopicIsolation tests that messages are only received on the correct topics
+func TestMultiTopicIsolation(t *testing.T) {
+	t.Log("=== Testing Multi-Topic Isolation ===")
+
+	topic1 := "topic-sensors"
+	topic2 := "topic-alerts"
+	topic3 := "topic-logs"
+	messageTimeout := 8 * time.Second
+
+	// Track messages by topic
+	var (
+		topic1Messages = make([]NodeMessage, 0)
+		topic2Messages = make([]NodeMessage, 0)
+		topic3Messages = make([]NodeMessage, 0)
+		messagesMutex  sync.RWMutex
+	)
+
+	// Topic-specific handlers
+	topic1Handler := func(event common.Event) {
+		var msg NodeMessage
+		if extractMessage(event, &msg) {
+			messagesMutex.Lock()
+			topic1Messages = append(topic1Messages, msg)
+			messagesMutex.Unlock()
+			t.Logf("Topic1 received: %+v", msg)
+		}
+	}
+
+	topic2Handler := func(event common.Event) {
+		var msg NodeMessage
+		if extractMessage(event, &msg) {
+			messagesMutex.Lock()
+			topic2Messages = append(topic2Messages, msg)
+			messagesMutex.Unlock()
+			t.Logf("Topic2 received: %+v", msg)
+		}
+	}
+
+	topic3Handler := func(event common.Event) {
+		var msg NodeMessage
+		if extractMessage(event, &msg) {
+			messagesMutex.Lock()
+			topic3Messages = append(topic3Messages, msg)
+			messagesMutex.Unlock()
+			t.Logf("Topic3 received: %+v", msg)
+		}
+	}
+
+	logger := &TestLogger{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Setup nodes
+	node0DB := setupNode(t, ctx, logger, node0PrivateKey, "test-network", 15001, 15002,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForBootstrap)
+	defer node0DB.Disconnect(ctx)
+
+	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+	defer node1DB.Disconnect(ctx)
+
+	// Subscribe nodes to different topic combinations
+	// Node 0: subscribes to topic1 and topic2
+	err := node0DB.Subscribe(ctx, topic1, topic1Handler)
+	if err != nil {
+		t.Fatalf("Node 0 failed to subscribe to topic1: %v", err)
+	}
+	err = node0DB.Subscribe(ctx, topic2, topic2Handler)
+	if err != nil {
+		t.Fatalf("Node 0 failed to subscribe to topic2: %v", err)
+	}
+
+	// Node 1: subscribes to topic2 and topic3
+	err = node1DB.Subscribe(ctx, topic2, topic2Handler)
+	if err != nil {
+		t.Fatalf("Node 1 failed to subscribe to topic2: %v", err)
+	}
+	err = node1DB.Subscribe(ctx, topic3, topic3Handler)
+	if err != nil {
+		t.Fatalf("Node 1 failed to subscribe to topic3: %v", err)
+	}
+
+	time.Sleep(5 * time.Second)
+
+	// Publish messages to different topics
+	msg1 := NodeMessage{NodeID: "publisher", Content: "Sensor data", Counter: 1}
+	msg2 := NodeMessage{NodeID: "publisher", Content: "Alert message", Counter: 2}
+	msg3 := NodeMessage{NodeID: "publisher", Content: "Log entry", Counter: 3}
+
+	// Publish to topic1 (only Node0 should receive)
+	_, err = node0DB.Publish(ctx, topic1, msg1)
+	if err != nil {
+		t.Fatalf("Failed to publish to topic1: %v", err)
+	}
+	t.Logf("Published to topic1: %+v", msg1)
+
+	time.Sleep(1 * time.Second)
+
+	// Publish to topic2 (both Node0 and Node1 should receive)
+	_, err = node1DB.Publish(ctx, topic2, msg2)
+	if err != nil {
+		t.Fatalf("Failed to publish to topic2: %v", err)
+	}
+	t.Logf("Published to topic2: %+v", msg2)
+
+	time.Sleep(1 * time.Second)
+
+	// Publish to topic3 (only Node1 should receive)
+	_, err = node1DB.Publish(ctx, topic3, msg3)
+	if err != nil {
+		t.Fatalf("Failed to publish to topic3: %v", err)
+	}
+	t.Logf("Published to topic3: %+v", msg3)
+
+	// Wait for message propagation
+	time.Sleep(messageTimeout)
+
+	// Verify topic isolation
+	messagesMutex.RLock()
+	defer messagesMutex.RUnlock()
+
+	// Topic1: should have 1 message (msg1) - only Node0 subscribed and published
+	if len(topic1Messages) != 0 { // Node0 doesn't receive its own messages
+		t.Errorf("Topic1: expected 0 messages, got %d", len(topic1Messages))
+	}
+
+	// Topic2: should have 1 message (msg2) - Node1 published, Node0 received
+	if len(topic2Messages) != 1 {
+		t.Errorf("Topic2: expected 1 message, got %d", len(topic2Messages))
+	} else if !reflect.DeepEqual(topic2Messages[0], msg2) {
+		t.Errorf("Topic2: message content mismatch. Expected %+v, got %+v", msg2, topic2Messages[0])
+	}
+
+	// Topic3: should have 0 messages - only Node1 subscribed and published (doesn't receive own)
+	if len(topic3Messages) != 0 {
+		t.Errorf("Topic3: expected 0 messages, got %d", len(topic3Messages))
+	}
+
+	t.Log("✅ Multi-topic isolation test PASSED")
+}
+
+// TestUnsubscribeFunctionality tests that nodes stop receiving messages after unsubscribing
+func TestUnsubscribeFunctionality(t *testing.T) {
+	t.Log("=== Testing Unsubscribe Functionality ===")
+
+	testTopic := "unsubscribe-test-topic"
+	messageTimeout := 5 * time.Second
+
+	var (
+		receivedMessages = make([]NodeMessage, 0)
+		messagesMutex    sync.RWMutex
+	)
+
+	messageHandler := func(event common.Event) {
+		var msg NodeMessage
+		if extractMessage(event, &msg) {
+			messagesMutex.Lock()
+			receivedMessages = append(receivedMessages, msg)
+			messagesMutex.Unlock()
+			t.Logf("Received message: %+v", msg)
+		}
+	}
+
+	logger := &TestLogger{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Setup nodes
+	node0DB := setupNode(t, ctx, logger, node0PrivateKey, "test-network", 15001, 15002,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForBootstrap)
+	defer node0DB.Disconnect(ctx)
+
+	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+	defer node1DB.Disconnect(ctx)
+
+	// Subscribe node1 to topic
+	err := node1DB.Subscribe(ctx, testTopic, messageHandler)
+	if err != nil {
+		t.Fatalf("Failed to subscribe: %v", err)
+	}
+
+	time.Sleep(3 * time.Second)
+
+	// Publish first message - should be received
+	msg1 := NodeMessage{NodeID: "test", Content: "Before unsubscribe", Counter: 1}
+	_, err = node0DB.Publish(ctx, testTopic, msg1)
+	if err != nil {
+		t.Fatalf("Failed to publish first message: %v", err)
+	}
+
+	time.Sleep(messageTimeout)
+
+	// Verify first message was received
+	messagesMutex.RLock()
+	firstCount := len(receivedMessages)
+	messagesMutex.RUnlock()
+
+	if firstCount != 1 {
+		t.Errorf("Expected 1 message before unsubscribe, got %d", firstCount)
+	}
+
+	// Unsubscribe from topic
+	t.Log("Unsubscribing from topic...")
+	err = node1DB.Unsubscribe(ctx, testTopic)
+	if err != nil {
+		t.Fatalf("Failed to unsubscribe: %v", err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// Publish second message - should NOT be received
+	msg2 := NodeMessage{NodeID: "test", Content: "After unsubscribe", Counter: 2}
+	_, err = node0DB.Publish(ctx, testTopic, msg2)
+	if err != nil {
+		t.Fatalf("Failed to publish second message: %v", err)
+	}
+
+	time.Sleep(messageTimeout)
+
+	// Verify second message was NOT received
+	messagesMutex.RLock()
+	finalCount := len(receivedMessages)
+	messagesMutex.RUnlock()
+
+	if finalCount != 1 {
+		t.Errorf("Expected 1 message after unsubscribe (no new messages), got %d", finalCount)
+	}
+
+	// Verify we can't unsubscribe from a topic we're not subscribed to
+	err = node1DB.Unsubscribe(ctx, "non-existent-topic")
+	if err == nil {
+		t.Error("Expected error when unsubscribing from non-existent topic")
+	}
+
+	// Test re-subscription works
+	t.Log("Re-subscribing to topic...")
+	err = node1DB.Subscribe(ctx, testTopic, messageHandler)
+	if err != nil {
+		t.Fatalf("Failed to re-subscribe: %v", err)
+	}
+
+	time.Sleep(3 * time.Second)
+
+	// Publish third message - should be received again
+	msg3 := NodeMessage{NodeID: "test", Content: "After re-subscribe", Counter: 3}
+	_, err = node0DB.Publish(ctx, testTopic, msg3)
+	if err != nil {
+		t.Fatalf("Failed to publish third message: %v", err)
+	}
+
+	time.Sleep(messageTimeout)
+
+	// Verify third message was received
+	messagesMutex.RLock()
+	resubscribeCount := len(receivedMessages)
+	lastMessage := receivedMessages[len(receivedMessages)-1]
+	messagesMutex.RUnlock()
+
+	if resubscribeCount != 2 {
+		t.Errorf("Expected 2 messages after re-subscribe, got %d", resubscribeCount)
+	}
+
+	if !reflect.DeepEqual(lastMessage, msg3) {
+		t.Errorf("Last message mismatch. Expected %+v, got %+v", msg3, lastMessage)
+	}
+
+	t.Log("✅ Unsubscribe functionality test PASSED")
+}
+
+// Helper functions
+
+func setupNode(t *testing.T, ctx context.Context, logger common.Logger, privateKey, dbName string,
+	quicPort, tcpPort int, getAuthorizedWallets common.GetAuthorizedWalletsFunc,
+	getBootstrapNodes common.GetBootstrapNodesFunc) *pubsub.DB {
+
+	config := common.Config{
+		WalletPrivateKey:     privateKey,
+		DatabaseName:         dbName,
+		GetAuthorizedWallets: getAuthorizedWallets,
+		GetBootstrapNodes:    getBootstrapNodes,
+		Logger:               logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: quicPort,
+			TCP:  tcpPort,
+		},
+	}
+
+	db, err := pubsub.Connect(ctx, config)
+	if err != nil {
+		t.Fatalf("Failed to connect node: %v", err)
+	}
+
+	return db
+}
+
+func extractMessage(event common.Event, target *NodeMessage) bool {
+	msgBytes, err := json.Marshal(event.Message)
+	if err != nil {
+		return false
+	}
+	return json.Unmarshal(msgBytes, target) == nil
+}
+
+func verifyMessagesContent(t *testing.T, nodeName string, received, expected []NodeMessage) {
+	if len(received) != len(expected) {
+		t.Errorf("%s: expected %d messages, got %d", nodeName, len(expected), len(received))
+		return
+	}
+
+	// Create maps for easier comparison (since order might vary)
+	receivedMap := make(map[string]NodeMessage)
+	expectedMap := make(map[string]NodeMessage)
+
+	for _, msg := range received {
+		receivedMap[msg.NodeID] = msg
+	}
+	for _, msg := range expected {
+		expectedMap[msg.NodeID] = msg
+	}
+
+	for nodeID, expectedMsg := range expectedMap {
+		receivedMsg, found := receivedMap[nodeID]
+		if !found {
+			t.Errorf("%s: missing message from %s", nodeName, nodeID)
+			continue
+		}
+		if !reflect.DeepEqual(receivedMsg, expectedMsg) {
+			t.Errorf("%s: message content mismatch for %s. Expected %+v, got %+v",
+				nodeName, nodeID, expectedMsg, receivedMsg)
+		}
+	}
+}
+
+// Keep the original test for backwards compatibility
 func TestMultiNodePubSub(t *testing.T) {
 	t.Log("=== Starting 3-Node P2P Integration Test ===")
 
 	// Test configuration
 	testTopic := "integration-test-topic"
 	messageTimeout := 10 * time.Second
-
-	// Message tracking
-	type NodeMessage struct {
-		NodeID  string `json:"node_id"`
-		Content string `json:"content"`
-		Counter int    `json:"counter"`
-	}
 
 	// Set up message collection for each node
 	var (

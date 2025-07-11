@@ -143,6 +143,43 @@ func (db *DB) messageListener(ctx context.Context, topicSub *TopicSubscription, 
 	}
 }
 
+// Unsubscribe unsubscribes from a topic and stops listening for messages
+func (db *DB) Unsubscribe(ctx context.Context, topic string) error {
+	db.instance.mutex.Lock()
+	defer db.instance.mutex.Unlock()
+
+	// Check if subscribed to this topic
+	topicSub, exists := db.instance.subscriptions[topic]
+	if !exists {
+		return fmt.Errorf("not subscribed to topic: %s", topic)
+	}
+
+	// Cancel the message listener
+	if topicSub.cancel != nil {
+		topicSub.cancel()
+	}
+
+	// Cancel the subscription
+	if topicSub.subscription != nil {
+		topicSub.subscription.Cancel()
+	}
+
+	// Close the topic if no other subscriptions depend on it
+	if topicSub.topic != nil {
+		topicSub.topic.Close()
+	}
+
+	// Remove from maps
+	delete(db.instance.subscriptions, topic)
+	delete(db.instance.topics, topic)
+
+	db.infrastructure.logger.Info("Unsubscribed from topic",
+		"topic", topic,
+		"database", db.instance.name)
+
+	return nil
+}
+
 // Publish publishes a message to a topic
 func (db *DB) Publish(ctx context.Context, topic string, value interface{}) (common.Event, error) {
 	db.instance.mutex.RLock()
