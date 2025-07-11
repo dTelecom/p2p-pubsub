@@ -247,8 +247,7 @@ Examples:
   subscribe sensors
   publish sensors {"temperature": 25.5, "humidity": 60}
   publish alerts "High temperature detected!"
-  unsubscribe sensors
-`)
+  unsubscribe sensors`)
 }
 
 // RunCLI runs the interactive command line interface

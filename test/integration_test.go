@@ -58,7 +58,7 @@ func mockGetUnauthorizedWallets(ctx context.Context) ([]solana.PublicKey, error)
 }
 
 // Mock bootstrap function for nodes 1 and 2 - returns node 0 as bootstrap
-func mockGetBootstrapNodesForClients(node0Host string, node0PeerID string, quicPort, tcpPort int) common.GetBootstrapNodesFunc {
+func mockGetBootstrapNodesForClients(node0Host string, quicPort, tcpPort int) common.GetBootstrapNodesFunc {
 	return func(ctx context.Context) ([]common.BootstrapNode, error) {
 		return []common.BootstrapNode{
 			{
@@ -157,7 +157,7 @@ func TestMultiNodePubSubWithContentVerification(t *testing.T) {
 
 	// Node 1 (Client)
 	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", 15001, 15002))
 	defer node1DB.Disconnect(ctx)
 
 	err = node1DB.Subscribe(ctx, testTopic, node1Handler)
@@ -167,7 +167,7 @@ func TestMultiNodePubSubWithContentVerification(t *testing.T) {
 
 	// Node 2 (Client)
 	node2DB := setupNode(t, ctx, logger, node2PrivateKey, "test-network", 15005, 15006,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", 15001, 15002))
 	defer node2DB.Disconnect(ctx)
 
 	err = node2DB.Subscribe(ctx, testTopic, node2Handler)
@@ -264,7 +264,7 @@ func TestUnauthorizedNodeBlocked(t *testing.T) {
 		WalletPrivateKey:     node3PrivateKey, // This key is NOT in the authorized list
 		DatabaseName:         "test-network",
 		GetAuthorizedWallets: mockGetUnauthorizedWallets, // Returns only node3, but authorized network only allows 0,1,2
-		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", authorizedDB.GetHost().ID().String(), 15001, 15002),
+		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", 15001, 15002),
 		Logger:               logger,
 		ListenPorts: common.ListenPorts{
 			QUIC: 15007,
@@ -397,7 +397,7 @@ func TestMultiTopicIsolation(t *testing.T) {
 	defer node0DB.Disconnect(ctx)
 
 	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", 15001, 15002))
 	defer node1DB.Disconnect(ctx)
 
 	// Subscribe nodes to different topic combinations
@@ -512,7 +512,7 @@ func TestUnsubscribeFunctionality(t *testing.T) {
 	defer node0DB.Disconnect(ctx)
 
 	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", 15001, 15002))
 	defer node1DB.Disconnect(ctx)
 
 	// Subscribe node1 to topic
@@ -635,12 +635,12 @@ func TestPublishThenSubscribeEdgeCase(t *testing.T) {
 
 	// Node 1 (Client) - just connect, NO subscription initially
 	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", 15001, 15002))
 	defer node1DB.Disconnect(ctx)
 
 	// Node 2 (Client) - just connect, NO subscription initially
 	node2DB := setupNode(t, ctx, logger, node2PrivateKey, "test-network", 15005, 15006,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", 15001, 15002))
 	defer node2DB.Disconnect(ctx)
 
 	// Wait for network convergence (same as working tests)
@@ -772,12 +772,12 @@ func TestBasicConnectivity(t *testing.T) {
 
 	// Node 1 (Client) - just connect, no pub/sub
 	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", 15001, 15002))
 	defer node1DB.Disconnect(ctx)
 
 	// Node 2 (Client) - just connect, no pub/sub
 	node2DB := setupNode(t, ctx, logger, node2PrivateKey, "test-network", 15005, 15006,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 15001, 15002))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", 15001, 15002))
 	defer node2DB.Disconnect(ctx)
 
 	// Wait for network convergence
@@ -994,7 +994,7 @@ func TestMultiNodePubSub(t *testing.T) {
 		WalletPrivateKey:     node1PrivateKey,
 		DatabaseName:         "test-network",
 		GetAuthorizedWallets: mockGetAuthorizedWallets,
-		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", node0Host.ID().String(), 15001, 15002),
+		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", 15001, 15002),
 		Logger:               logger,
 		ListenPorts: common.ListenPorts{
 			QUIC: 15003,
@@ -1022,7 +1022,7 @@ func TestMultiNodePubSub(t *testing.T) {
 		WalletPrivateKey:     node2PrivateKey,
 		DatabaseName:         "test-network",
 		GetAuthorizedWallets: mockGetAuthorizedWallets,
-		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", node0Host.ID().String(), 15001, 15002),
+		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", 15001, 15002),
 		Logger:               logger,
 		ListenPorts: common.ListenPorts{
 			QUIC: 15005,
@@ -1190,12 +1190,12 @@ func TestConnectivityIssueReproduction(t *testing.T) {
 
 	// Node 1 (Client) - different ports, different timing
 	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "different-network", 18003, 18004,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 18001, 18002))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", 18001, 18002))
 	defer node1DB.Disconnect(ctx)
 
 	// Node 2 (Client) - more different ports
 	node2DB := setupNode(t, ctx, logger, node2PrivateKey, "different-network", 18005, 18006,
-		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String(), 18001, 18002))
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", 18001, 18002))
 	defer node2DB.Disconnect(ctx)
 
 	// Wait for connectivity (shorter time that previously failed)
@@ -1278,8 +1278,7 @@ func TestBootstrapAddressValidation(t *testing.T) {
 			defer node0DB.Disconnect(ctx)
 
 			// Create bootstrap function with actual node0 ports
-			bootstrapFunc := mockGetBootstrapNodesForClients("127.0.0.1",
-				node0DB.GetHost().ID().String(), tc.bootstrapPorts[0], tc.bootstrapPorts[1])
+			bootstrapFunc := mockGetBootstrapNodesForClients("127.0.0.1", tc.bootstrapPorts[0], tc.bootstrapPorts[1])
 
 			// Node 1 (Client) - should use node0's actual ports for bootstrap
 			node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-bootstrap-validation",
