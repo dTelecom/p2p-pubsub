@@ -20,23 +20,25 @@ import (
 	"github.com/multiformats/go-multiaddr"
 )
 
-// P2PInfrastructure manages the shared libp2p resources for all databases
+// P2PInfrastructure manages the libp2p resources for a single database connection
 type P2PInfrastructure struct {
-	host      host.Host             // Single libp2p host for all databases
+	host      host.Host             // Single libp2p host
 	dht       *dual.DHT             // Kademlia DHT for peer discovery
 	gossipSub *pubsub.PubSub        // GossipSub instance for pub/sub messaging
 	connMgr   *connmgr.BasicConnMgr // Connection manager
 	discovery *DiscoveryService     // Peer discovery service
 
-	// Database-specific resources
-	databases map[string]*DatabaseInstance // Active database instances
-	mutex     sync.RWMutex                 // Protects databases map
-
 	// Configuration
 	logger common.Logger
+
+	// Readiness and bootstrap retry state
+	isReady           bool                         // True when node has at least 1 peer connected
+	readinessMutex    sync.RWMutex                 // Protects isReady
+	getBootstrapNodes common.GetBootstrapNodesFunc // Bootstrap function for retry attempts
+	retryCancel       context.CancelFunc           // Cancel function for bootstrap retry goroutine
 }
 
-// DatabaseInstance represents a per-database instance with isolated topics
+// DatabaseInstance represents a database instance with isolated topics
 type DatabaseInstance struct {
 	name          string                        // Database name
 	gater         *common.SolanaRegistryGater   // Registry-based connection gater
@@ -59,11 +61,30 @@ type DB struct {
 	instance       *DatabaseInstance
 }
 
-// globalInfrastructures stores infrastructure instances keyed by peer ID
-var (
-	globalInfrastructures = make(map[string]*P2PInfrastructure)
-	globalInfraMutex      sync.RWMutex
-)
+// IsReady returns true if the node has at least 1 peer connected
+func (infra *P2PInfrastructure) IsReady() bool {
+	infra.readinessMutex.RLock()
+	defer infra.readinessMutex.RUnlock()
+	return infra.isReady
+}
+
+// updateReadiness updates the readiness state based on peer count
+func (infra *P2PInfrastructure) updateReadiness() {
+	peerCount := len(infra.host.Network().Peers())
+
+	infra.readinessMutex.Lock()
+	defer infra.readinessMutex.Unlock()
+
+	wasReady := infra.isReady
+	infra.isReady = peerCount > 0
+
+	// Log readiness state changes
+	if !wasReady && infra.isReady {
+		infra.logger.Info("Node became ready", "peer_count", peerCount)
+	} else if wasReady && !infra.isReady {
+		infra.logger.Info("Node no longer ready", "peer_count", peerCount)
+	}
+}
 
 // enableLibp2pDebugLogging enables debug logging for key libp2p subsystems
 func enableLibp2pDebugLogging() {
@@ -163,24 +184,41 @@ func initializeP2PInfrastructure(config common.Config) (*P2PInfrastructure, erro
 	// Create discovery service
 	discoveryService := NewDiscoveryService(host, dht, config.Logger)
 
-	// Bootstrap connection to network
-	if err := bootstrapNetwork(context.Background(), host, dht, config.GetBootstrapNodes, config.Logger); err != nil {
-		config.Logger.Warn("Failed to bootstrap network", "error", err.Error())
-		// Don't fail completely, continue without bootstrap
-	} else {
-		// Give DHT a moment to settle after bootstrap
-		time.Sleep(1 * time.Second)
+	// Create infrastructure with readiness tracking
+	infra := &P2PInfrastructure{
+		host:              host,
+		dht:               dht,
+		gossipSub:         gossipSub,
+		connMgr:           connManager,
+		discovery:         discoveryService,
+		logger:            config.Logger,
+		isReady:           false, // Initially not ready
+		getBootstrapNodes: config.GetBootstrapNodes,
 	}
 
-	return &P2PInfrastructure{
-		host:      host,
-		dht:       dht,
-		gossipSub: gossipSub,
-		connMgr:   connManager,
-		discovery: discoveryService,
-		databases: make(map[string]*DatabaseInstance),
-		logger:    config.Logger,
-	}, nil
+	// Set up connection event monitoring to track readiness
+	host.Network().Notify(&network.NotifyBundle{
+		ConnectedF: func(n network.Network, c network.Conn) {
+			config.Logger.Debug("Peer connected",
+				"peer_id", c.RemotePeer().String(),
+				"local_addr", c.LocalMultiaddr().String(),
+				"remote_addr", c.RemoteMultiaddr().String())
+			infra.updateReadiness()
+		},
+		DisconnectedF: func(n network.Network, c network.Conn) {
+			config.Logger.Debug("Peer disconnected",
+				"peer_id", c.RemotePeer().String())
+			infra.updateReadiness()
+		},
+	})
+
+	// Bootstrap connection to network with retry support
+	if err := bootstrapNetworkWithRetry(context.Background(), infra); err != nil {
+		config.Logger.Warn("Failed to start bootstrap process", "error", err.Error())
+		// Don't fail completely, continue without bootstrap
+	}
+
+	return infra, nil
 }
 
 // bootstrapNetwork connects to bootstrap nodes and starts DHT
@@ -267,23 +305,99 @@ func bootstrapNetwork(ctx context.Context, host host.Host, dht *dual.DHT, getBoo
 	return nil
 }
 
+// bootstrapNetworkWithRetry starts bootstrap process with retry support for empty bootstrap node lists
+func bootstrapNetworkWithRetry(ctx context.Context, infra *P2PInfrastructure) error {
+	// Check bootstrap nodes availability first
+	bootstrapNodes, err := infra.getBootstrapNodes(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get bootstrap nodes: %w", err)
+	}
+
+	if len(bootstrapNodes) == 0 {
+		// No bootstrap nodes available, start retry process
+		infra.logger.Info("No bootstrap nodes available, starting retry process")
+		infra.startBootstrapRetry(ctx)
+		return nil // Don't return error, we'll retry
+	}
+
+	// Bootstrap nodes are available, try normal bootstrap
+	err = bootstrapNetwork(ctx, infra.host, infra.dht, infra.getBootstrapNodes, infra.logger)
+	if err != nil {
+		// Bootstrap failed, but we had nodes - this is a real error
+		return err
+	}
+
+	// Bootstrap succeeded
+	infra.logger.Info("Initial bootstrap successful")
+	time.Sleep(1 * time.Second) // Give DHT a moment to settle
+	return nil
+}
+
+// startBootstrapRetry starts a goroutine that retries bootstrap every 5 seconds until ready
+func (infra *P2PInfrastructure) startBootstrapRetry(parentCtx context.Context) {
+	// Create cancelable context for the retry goroutine
+	retryCtx, cancel := context.WithCancel(parentCtx)
+	infra.retryCancel = cancel
+
+	go func() {
+		defer cancel()
+
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		infra.logger.Info("Starting bootstrap retry loop (every 5 seconds)")
+
+		for {
+			select {
+			case <-retryCtx.Done():
+				infra.logger.Debug("Bootstrap retry loop cancelled")
+				return
+			case <-ticker.C:
+				// Check if node is already ready (has peers)
+				if infra.IsReady() {
+					infra.logger.Info("Node is ready, stopping bootstrap retry")
+					return
+				}
+
+				// Try to get bootstrap nodes
+				bootstrapNodes, err := infra.getBootstrapNodes(retryCtx)
+				if err != nil {
+					infra.logger.Warn("Failed to get bootstrap nodes during retry", "error", err.Error())
+					continue
+				}
+
+				if len(bootstrapNodes) == 0 {
+					infra.logger.Debug("Still no bootstrap nodes available, will retry")
+					continue
+				}
+
+				// Found bootstrap nodes, try to connect
+				infra.logger.Info("Found bootstrap nodes during retry", "count", len(bootstrapNodes))
+				if err := bootstrapNetwork(retryCtx, infra.host, infra.dht, infra.getBootstrapNodes, infra.logger); err != nil {
+					infra.logger.Warn("Bootstrap retry failed", "error", err.Error())
+					continue
+				}
+
+				// Bootstrap succeeded
+				infra.logger.Info("Bootstrap retry successful")
+				time.Sleep(1 * time.Second) // Give DHT a moment to settle
+				return
+			}
+		}
+	}()
+}
+
+// stopBootstrapRetry stops the bootstrap retry goroutine if it's running
+func (infra *P2PInfrastructure) stopBootstrapRetry() {
+	if infra.retryCancel != nil {
+		infra.logger.Debug("Stopping bootstrap retry goroutine")
+		infra.retryCancel()
+		infra.retryCancel = nil
+	}
+}
+
 // createDatabaseInstance creates a new database instance with connection gating
 func createDatabaseInstance(infra *P2PInfrastructure, config common.Config) (*DB, error) {
-	// Apply connection event notifications
-	infra.host.Network().Notify(&network.NotifyBundle{
-		ConnectedF: func(n network.Network, c network.Conn) {
-			// Connection was allowed by gater
-			config.Logger.Debug("Connection established",
-				"peer_id", c.RemotePeer().String(),
-				"local_addr", c.LocalMultiaddr().String(),
-				"remote_addr", c.RemoteMultiaddr().String())
-		},
-		DisconnectedF: func(n network.Network, c network.Conn) {
-			config.Logger.Debug("Connection closed",
-				"peer_id", c.RemotePeer().String())
-		},
-	})
-
 	// Create database instance
 	dbInstance := &DatabaseInstance{
 		name:          config.DatabaseName,
@@ -292,10 +406,11 @@ func createDatabaseInstance(infra *P2PInfrastructure, config common.Config) (*DB
 		subscriptions: make(map[string]*TopicSubscription),
 	}
 
-	// Register database instance
-	infra.mutex.Lock()
-	infra.databases[config.DatabaseName] = dbInstance
-	infra.mutex.Unlock()
+	// This globalInfraMutex and globalInfrastructures are removed, so this line is removed.
+	// The infrastructure is now directly managed by the caller.
+	// infra.mutex.Lock()
+	// infra.databases[config.DatabaseName] = dbInstance
+	// infra.mutex.Unlock()
 
 	config.Logger.Info("Created database instance",
 		"database_name", config.DatabaseName,
@@ -342,26 +457,11 @@ func Connect(ctx context.Context, config common.Config) (*DB, error) {
 		config.ListenPorts.TCP = 4002
 	}
 
-	// Create identity to get the peer ID for infrastructure lookup
-	_, peerID, err := common.CreateIdentityFromSolanaKey(config.WalletPrivateKey)
+	// Initialize new infrastructure for this connection
+	infrastructure, err := initializeP2PInfrastructure(config)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create identity for infrastructure lookup: %w", err)
+		return nil, fmt.Errorf("failed to initialize P2P infrastructure: %w", err)
 	}
-
-	peerIDString := peerID.String()
-
-	// Initialize infrastructure for this peer ID if not exists
-	globalInfraMutex.Lock()
-	infrastructure, exists := globalInfrastructures[peerIDString]
-	if !exists {
-		infrastructure, err = initializeP2PInfrastructure(config)
-		if err != nil {
-			globalInfraMutex.Unlock()
-			return nil, fmt.Errorf("failed to initialize P2P infrastructure: %w", err)
-		}
-		globalInfrastructures[peerIDString] = infrastructure
-	}
-	globalInfraMutex.Unlock()
 
 	// Create database instance
 	return createDatabaseInstance(infrastructure, config)

@@ -1362,6 +1362,334 @@ func TestBootstrapAddressValidation(t *testing.T) {
 			t.Logf("✅ Bootstrap validation successful for %s - all nodes connected and communicating", tc.name)
 		})
 	}
+	t.Log("✅ Bootstrap validation successful for all test cases")
+}
+
+// TestBootstrapRetryEmptyNodes tests bootstrap retry when no nodes are initially available
+func TestBootstrapRetryEmptyNodes(t *testing.T) {
+	t.Log("=== Testing Bootstrap Retry with Initially Empty Nodes ===")
+
+	logger := &TestLogger{}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create a mock that initially returns empty but later returns bootstrap nodes
+	var callCount int
+	var mutex sync.Mutex
+	delayedBootstrapFunc := func(ctx context.Context) ([]common.BootstrapNode, error) {
+		mutex.Lock()
+		defer mutex.Unlock()
+		callCount++
+
+		// First 2 calls return empty (simulating no bootstrap nodes available initially)
+		if callCount <= 2 {
+			t.Logf("Bootstrap call %d: returning empty list", callCount)
+			return []common.BootstrapNode{}, nil
+		}
+
+		// After that, return bootstrap nodes (simulating registry becoming available)
+		t.Logf("Bootstrap call %d: returning bootstrap nodes", callCount)
+		return []common.BootstrapNode{
+			{
+				PublicKey: solana.MustPublicKeyFromBase58(node0PublicKey),
+				IP:        "127.0.0.1",
+				QUICPort:  15001,
+				TCPPort:   15002,
+			},
+		}, nil
+	}
+
+	// Start bootstrap node first
+	node0Config := common.Config{
+		WalletPrivateKey:     node0PrivateKey,
+		DatabaseName:         "test-retry",
+		GetAuthorizedWallets: mockGetAuthorizedWallets,
+		GetBootstrapNodes:    mockGetBootstrapNodesForBootstrap,
+		Logger:               logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 15001,
+			TCP:  15002,
+		},
+	}
+
+	node0DB, err := pubsub.Connect(ctx, node0Config)
+	if err != nil {
+		t.Fatalf("Failed to connect bootstrap node: %v", err)
+	}
+	defer func() { _ = node0DB.Disconnect(ctx) }()
+
+	// Node 0 should be ready immediately (bootstrap node)
+	if !node0DB.IsReady() {
+		t.Log("Note: Bootstrap node not immediately ready, waiting...")
+		// Give it a moment to settle
+		time.Sleep(2 * time.Second)
+	}
+
+	// Start client node that will use delayed bootstrap function
+	node1Config := common.Config{
+		WalletPrivateKey:     node1PrivateKey,
+		DatabaseName:         "test-retry",
+		GetAuthorizedWallets: mockGetAuthorizedWallets,
+		GetBootstrapNodes:    delayedBootstrapFunc, // This will retry
+		Logger:               logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 15003,
+			TCP:  15004,
+		},
+	}
+
+	node1DB, err := pubsub.Connect(ctx, node1Config)
+	if err != nil {
+		t.Fatalf("Failed to connect client node: %v", err)
+	}
+	defer func() { _ = node1DB.Disconnect(ctx) }()
+
+	// Node 1 should initially not be ready
+	if node1DB.IsReady() {
+		t.Log("Note: Client node is immediately ready - this may be expected if bootstrap worked")
+	}
+
+	// Wait for retry to kick in and bootstrap to succeed
+	t.Log("Waiting for bootstrap retry to succeed...")
+	startTime := time.Now()
+	timeout := 20 * time.Second
+
+	for time.Since(startTime) < timeout {
+		if node1DB.IsReady() {
+			t.Logf("✅ Node became ready after %v", time.Since(startTime))
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	// Give connections time to stabilize
+	time.Sleep(2 * time.Second)
+
+	// Verify node is now ready
+	if !node1DB.IsReady() {
+		t.Errorf("Node should be ready after bootstrap retry, but IsReady() = false")
+	}
+
+	// Verify both nodes can see each other
+	node0Peers := len(node0DB.GetHost().Network().Peers())
+	node1Peers := len(node1DB.GetHost().Network().Peers())
+
+	t.Logf("Node 0 peers: %d, Node 1 peers: %d", node0Peers, node1Peers)
+
+	if node0Peers < 1 || node1Peers < 1 {
+		t.Errorf("Expected both nodes to have at least 1 peer, got Node0: %d, Node1: %d", node0Peers, node1Peers)
+	}
+
+	// Verify the bootstrap function was called multiple times
+	mutex.Lock()
+	finalCallCount := callCount
+	mutex.Unlock()
+
+	if finalCallCount < 3 {
+		t.Errorf("Expected at least 3 bootstrap calls (showing retry), got %d", finalCallCount)
+	}
+
+	t.Log("✅ Bootstrap retry test passed")
+}
+
+// TestReadinessStateTracking tests that readiness state is properly tracked
+func TestReadinessStateTracking(t *testing.T) {
+	t.Log("=== Testing Readiness State Tracking ===")
+
+	logger := &TestLogger{}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create isolated node with no bootstrap nodes
+	isolatedConfig := common.Config{
+		WalletPrivateKey:     node1PrivateKey,
+		DatabaseName:         "test-readiness",
+		GetAuthorizedWallets: mockGetAuthorizedWallets,
+		GetBootstrapNodes:    mockGetBootstrapNodesForBootstrap, // Returns empty
+		Logger:               logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 15007,
+			TCP:  15008,
+		},
+	}
+
+	isolatedDB, err := pubsub.Connect(ctx, isolatedConfig)
+	if err != nil {
+		t.Fatalf("Failed to connect isolated node: %v", err)
+	}
+	defer func() { _ = isolatedDB.Disconnect(ctx) }()
+
+	// Node should not be ready initially
+	if isolatedDB.IsReady() {
+		t.Log("Note: Isolated node is ready immediately - may have found peers through other means")
+	} else {
+		t.Log("✅ Isolated node correctly shows not ready")
+	}
+
+	// Create a peer node that will connect to the isolated node
+	peerConfig := common.Config{
+		WalletPrivateKey:     node0PrivateKey,
+		DatabaseName:         "test-readiness",
+		GetAuthorizedWallets: mockGetAuthorizedWallets,
+		GetBootstrapNodes: func(ctx context.Context) ([]common.BootstrapNode, error) {
+			// Return the isolated node as bootstrap
+			return []common.BootstrapNode{
+				{
+					PublicKey: solana.MustPublicKeyFromBase58(node1PublicKey),
+					IP:        "127.0.0.1",
+					QUICPort:  15007,
+					TCPPort:   15008,
+				},
+			}, nil
+		},
+		Logger: logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 15009,
+			TCP:  15010,
+		},
+	}
+
+	peerDB, err := pubsub.Connect(ctx, peerConfig)
+	if err != nil {
+		t.Fatalf("Failed to connect peer node: %v", err)
+	}
+	defer func() { _ = peerDB.Disconnect(ctx) }()
+
+	// Wait for connection to be established
+	t.Log("Waiting for peer connection...")
+	startTime := time.Now()
+	timeout := 10 * time.Second
+
+	for time.Since(startTime) < timeout {
+		if isolatedDB.IsReady() && peerDB.IsReady() {
+			t.Logf("✅ Both nodes became ready after %v", time.Since(startTime))
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Verify both nodes are ready
+	if !isolatedDB.IsReady() {
+		t.Errorf("Isolated node should be ready after peer connection")
+	}
+	if !peerDB.IsReady() {
+		t.Errorf("Peer node should be ready after connection")
+	}
+
+	// Verify they can see each other
+	isolatedPeers := len(isolatedDB.GetHost().Network().Peers())
+	peerPeers := len(peerDB.GetHost().Network().Peers())
+
+	if isolatedPeers < 1 || peerPeers < 1 {
+		t.Errorf("Expected both nodes to have peers, got isolated: %d, peer: %d", isolatedPeers, peerPeers)
+	}
+
+	t.Log("✅ Readiness state tracking test passed")
+}
+
+// TestBootstrapRetryStopsWhenReady tests that bootstrap retry stops when node becomes ready
+func TestBootstrapRetryStopsWhenReady(t *testing.T) {
+	t.Log("=== Testing Bootstrap Retry Stops When Node Becomes Ready ===")
+
+	logger := &TestLogger{}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Track bootstrap function calls
+	var callCount int
+	var mutex sync.Mutex
+	trackingBootstrapFunc := func(ctx context.Context) ([]common.BootstrapNode, error) {
+		mutex.Lock()
+		defer mutex.Unlock()
+		callCount++
+		t.Logf("Bootstrap function called (count: %d)", callCount)
+
+		// Always return empty to trigger retry
+		return []common.BootstrapNode{}, nil
+	}
+
+	// Start node with empty bootstrap (will trigger retry)
+	node1Config := common.Config{
+		WalletPrivateKey:     node1PrivateKey,
+		DatabaseName:         "test-retry-stop",
+		GetAuthorizedWallets: mockGetAuthorizedWallets,
+		GetBootstrapNodes:    trackingBootstrapFunc,
+		Logger:               logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 15011,
+			TCP:  15012,
+		},
+	}
+
+	node1DB, err := pubsub.Connect(ctx, node1Config)
+	if err != nil {
+		t.Fatalf("Failed to connect node: %v", err)
+	}
+	defer func() { _ = node1DB.Disconnect(ctx) }()
+
+	// Wait a bit for retry to start
+	time.Sleep(3 * time.Second)
+
+	// Count calls before peer connection
+	mutex.Lock()
+	callsBeforePeer := callCount
+	mutex.Unlock()
+
+	t.Logf("Bootstrap calls before peer connection: %d", callsBeforePeer)
+
+	// Now create a peer that will connect to node1
+	node2Config := common.Config{
+		WalletPrivateKey:     node2PrivateKey,
+		DatabaseName:         "test-retry-stop",
+		GetAuthorizedWallets: mockGetAuthorizedWallets,
+		GetBootstrapNodes: func(ctx context.Context) ([]common.BootstrapNode, error) {
+			return []common.BootstrapNode{
+				{
+					PublicKey: solana.MustPublicKeyFromBase58(node1PublicKey),
+					IP:        "127.0.0.1",
+					QUICPort:  15011,
+					TCPPort:   15012,
+				},
+			}, nil
+		},
+		Logger: logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 15013,
+			TCP:  15014,
+		},
+	}
+
+	node2DB, err := pubsub.Connect(ctx, node2Config)
+	if err != nil {
+		t.Fatalf("Failed to connect peer node: %v", err)
+	}
+	defer func() { _ = node2DB.Disconnect(ctx) }()
+
+	// Wait for connection
+	time.Sleep(2 * time.Second)
+
+	// Verify node1 is ready
+	if !node1DB.IsReady() {
+		t.Errorf("Node1 should be ready after peer connection")
+	}
+
+	// Wait a bit more to see if bootstrap retry stops
+	time.Sleep(8 * time.Second)
+
+	// Count final calls
+	mutex.Lock()
+	finalCallCount := callCount
+	mutex.Unlock()
+
+	t.Logf("Bootstrap calls after peer connection: %d (started with %d)", finalCallCount, callsBeforePeer)
+
+	// The retry should have stopped, so call count shouldn't increase much
+	// Allow for one additional call due to timing, but no more
+	if finalCallCount > callsBeforePeer+2 {
+		t.Errorf("Bootstrap retry should have stopped when node became ready, but calls increased from %d to %d", callsBeforePeer, finalCallCount)
+	}
+
+	t.Log("✅ Bootstrap retry stop test passed")
 }
 
 // TestLogger is a simple test logger

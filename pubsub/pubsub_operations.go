@@ -273,10 +273,18 @@ func (db *DB) GetHost() host.Host {
 	return db.infrastructure.host
 }
 
+// IsReady returns true if the node has at least 1 peer connected
+func (db *DB) IsReady() bool {
+	return db.infrastructure.IsReady()
+}
+
 // Disconnect closes the database connection and cleans up resources
 func (db *DB) Disconnect(ctx context.Context) error {
 	db.instance.mutex.Lock()
 	defer db.instance.mutex.Unlock()
+
+	// Stop bootstrap retry first (before closing other components)
+	db.infrastructure.stopBootstrapRetry()
 
 	// Cancel all subscriptions
 	for topic, subscription := range db.instance.subscriptions {
@@ -299,12 +307,31 @@ func (db *DB) Disconnect(ctx context.Context) error {
 		delete(db.instance.topics, topic)
 	}
 
-	// Remove database instance from infrastructure
-	db.infrastructure.mutex.Lock()
-	delete(db.infrastructure.databases, db.instance.name)
-	db.infrastructure.mutex.Unlock()
+	// Close infrastructure resources in proper order
+	// 1. Close GossipSub first to stop message processing
+	if db.infrastructure.gossipSub != nil {
+		// GossipSub doesn't have explicit close - it's closed when host closes
+		db.infrastructure.logger.Debug("GossipSub will be closed when host closes")
+	}
 
-	db.infrastructure.logger.Info("Disconnected from database",
+	// 2. Close DHT to stop peer discovery
+	if db.infrastructure.dht != nil {
+		if closeErr := db.infrastructure.dht.Close(); closeErr != nil {
+			db.infrastructure.logger.Warn("Failed to close DHT during disconnect", "error", closeErr.Error())
+		}
+	}
+
+	// 3. Close host last to terminate all connections and streams
+	if db.infrastructure.host != nil {
+		if closeErr := db.infrastructure.host.Close(); closeErr != nil {
+			db.infrastructure.logger.Warn("Failed to close host during disconnect", "error", closeErr.Error())
+		}
+	}
+
+	// Give goroutines time to shut down
+	time.Sleep(100 * time.Millisecond)
+
+	db.infrastructure.logger.Info("Disconnected from database and cleaned up infrastructure",
 		"database", db.instance.name)
 
 	return nil
