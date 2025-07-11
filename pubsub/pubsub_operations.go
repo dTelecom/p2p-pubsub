@@ -283,7 +283,12 @@ func (db *DB) Disconnect(ctx context.Context) error {
 	db.instance.mutex.Lock()
 	defer db.instance.mutex.Unlock()
 
-	// Stop bootstrap retry first (before closing other components)
+	// Cancel shutdown context first to stop all retry operations immediately
+	if db.infrastructure.shutdownCancel != nil {
+		db.infrastructure.shutdownCancel()
+	}
+
+	// Stop bootstrap retry (this should now be redundant but kept for safety)
 	db.infrastructure.stopBootstrapRetry()
 
 	// Cancel all subscriptions

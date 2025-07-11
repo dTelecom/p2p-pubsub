@@ -37,6 +37,10 @@ type P2PInfrastructure struct {
 	getBootstrapNodes common.GetBootstrapNodesFunc // Bootstrap function for retry attempts
 	retryCancel       context.CancelFunc           // Cancel function for bootstrap retry goroutine
 	retryMutex        sync.Mutex                   // Protects retryCancel
+
+	// Shutdown handling
+	shutdownCtx    context.Context    // Context that gets cancelled during shutdown
+	shutdownCancel context.CancelFunc // Cancel function for shutdown
 }
 
 // DatabaseInstance represents a database instance with isolated topics
@@ -92,6 +96,15 @@ func (infra *P2PInfrastructure) updateReadiness() {
 // startBootstrapRetryAfterDelay starts bootstrap retry after a short delay
 // This is used when a node loses all peers and becomes not ready
 func (infra *P2PInfrastructure) startBootstrapRetryAfterDelay() {
+	// Check if retry is already running (avoid starting multiple goroutines)
+	infra.retryMutex.Lock()
+	if infra.retryCancel != nil {
+		infra.retryMutex.Unlock()
+		infra.logger.Debug("Bootstrap retry already running, skipping delayed start")
+		return
+	}
+	infra.retryMutex.Unlock()
+
 	// Wait a bit before starting retry to avoid immediate reconnection attempts
 	time.Sleep(2 * time.Second)
 
@@ -101,8 +114,9 @@ func (infra *P2PInfrastructure) startBootstrapRetryAfterDelay() {
 
 	if stillNotReady {
 		infra.logger.Info("Node still not ready after delay, starting bootstrap retry")
-		ctx := context.Background()
-		infra.startBootstrapRetry(ctx)
+		infra.startBootstrapRetry(infra.shutdownCtx)
+	} else {
+		infra.logger.Debug("Node became ready during delay, skipping bootstrap retry")
 	}
 }
 
@@ -204,6 +218,9 @@ func initializeP2PInfrastructure(config common.Config) (*P2PInfrastructure, erro
 	// Create discovery service
 	discoveryService := NewDiscoveryService(host, dht, config.Logger)
 
+	// Create shutdown context for proper cleanup
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+
 	// Create infrastructure with readiness tracking
 	infra := &P2PInfrastructure{
 		host:              host,
@@ -214,6 +231,8 @@ func initializeP2PInfrastructure(config common.Config) (*P2PInfrastructure, erro
 		logger:            config.Logger,
 		isReady:           false, // Initially not ready
 		getBootstrapNodes: config.GetBootstrapNodes,
+		shutdownCtx:       shutdownCtx,
+		shutdownCancel:    shutdownCancel,
 	}
 
 	// Set up connection event monitoring to track readiness
@@ -336,7 +355,7 @@ func bootstrapNetworkWithRetry(ctx context.Context, infra *P2PInfrastructure) er
 	if len(bootstrapNodes) == 0 {
 		// No bootstrap nodes available, start retry process
 		infra.logger.Info("No bootstrap nodes available, starting retry process")
-		infra.startBootstrapRetry(ctx)
+		infra.startBootstrapRetry(infra.shutdownCtx)
 		return nil // Don't return error, we'll retry
 	}
 
@@ -355,6 +374,14 @@ func bootstrapNetworkWithRetry(ctx context.Context, infra *P2PInfrastructure) er
 
 // startBootstrapRetry starts a goroutine that retries bootstrap every 5 seconds until ready
 func (infra *P2PInfrastructure) startBootstrapRetry(parentCtx context.Context) {
+	// Check if shutdown is in progress
+	select {
+	case <-infra.shutdownCtx.Done():
+		infra.logger.Debug("Shutdown in progress, not starting bootstrap retry")
+		return
+	default:
+	}
+
 	// Check if retry is already running (with proper synchronization)
 	infra.retryMutex.Lock()
 	if infra.retryCancel != nil {
@@ -363,7 +390,7 @@ func (infra *P2PInfrastructure) startBootstrapRetry(parentCtx context.Context) {
 		return
 	}
 
-	// Create cancelable context for the retry goroutine
+	// Create cancelable context for the retry goroutine - combine parent and shutdown contexts
 	retryCtx, cancel := context.WithCancel(parentCtx)
 	infra.retryCancel = cancel
 	infra.retryMutex.Unlock()
@@ -386,6 +413,9 @@ func (infra *P2PInfrastructure) startBootstrapRetry(parentCtx context.Context) {
 			select {
 			case <-retryCtx.Done():
 				infra.logger.Debug("Bootstrap retry loop cancelled")
+				return
+			case <-infra.shutdownCtx.Done():
+				infra.logger.Debug("Bootstrap retry loop cancelled due to shutdown")
 				return
 			case <-ticker.C:
 				// Check if node is already ready (has peers)
