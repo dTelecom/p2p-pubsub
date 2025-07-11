@@ -514,6 +514,102 @@ type Event struct {
 
 ---
 
+## Message Delivery Behavior
+
+### Self-Message Filtering
+
+**Critical Implementation Detail**: Nodes **ALWAYS** skip messages they send themselves to prevent echo loops in the distributed network.
+
+```go
+// In messageListener goroutine (pubsub_operations.go)
+if msg.ReceivedFrom == db.infrastructure.host.ID() {
+    continue  // Always skip own messages - no exceptions
+}
+```
+
+**Why This Matters:**
+- **Echo Prevention**: Without self-filtering, nodes would receive their own messages infinitely
+- **Network Efficiency**: Prevents unnecessary message processing and storage
+- **Consistent Behavior**: All P2P networks implement this fundamental rule
+
+**Developer Implications:**
+- **Single-Node Testing**: Cannot verify message delivery with only one node
+- **Multi-Node Requirement**: Message delivery verification requires at least 2 nodes
+- **Handler Behavior**: Message handlers will never receive messages published by the same node
+
+### Testing Requirements
+
+**Minimum Node Count for Testing**: All tests verifying message delivery must use **at least 2 nodes**.
+
+#### ✅ Correct Test Pattern
+```go
+func TestMessageDelivery(t *testing.T) {
+    // Create at least 2 nodes
+    node1 := setupNode(t, config1)
+    node2 := setupNode(t, config2)
+    
+    // Subscribe on receiving node
+    node2.Subscribe(ctx, "test-topic", handler)
+    
+    // Publish from sending node  
+    node1.Publish(ctx, "test-topic", message)
+    
+    // Verify node2 received the message from node1
+    verifyMessageReceived(t, receivedMessages)
+}
+```
+
+#### ❌ Incorrect Test Pattern  
+```go
+func TestMessageDelivery(t *testing.T) {
+    // Single node - CANNOT verify message delivery
+    node := setupNode(t, config)
+    
+    node.Subscribe(ctx, "test-topic", handler)
+    node.Publish(ctx, "test-topic", message)
+    
+    // This will ALWAYS fail - nodes never receive own messages
+    verifyMessageReceived(t, receivedMessages) // Will be empty
+}
+```
+
+#### Test Architecture Recommendations
+
+**Integration Test Pattern**:
+```go
+// Use multiple nodes to simulate real network conditions
+nodes := []struct{
+    id   string
+    role string
+}{
+    {"bootstrap", "message receiver"},
+    {"client1", "message sender"},  
+    {"client2", "message sender"},
+}
+
+// Each test should verify:
+// 1. Messages sent by node A are received by nodes B, C
+// 2. Messages sent by node B are received by nodes A, C  
+// 3. Messages sent by node C are received by nodes A, B
+// 4. No node receives its own messages
+```
+
+**Topic Isolation Testing**:
+```go
+// Multi-node, multi-topic verification
+func TestTopicIsolation(t *testing.T) {
+    node1.Subscribe(ctx, "topic-a", handlerA)
+    node2.Subscribe(ctx, "topic-b", handlerB)
+    node3.Subscribe(ctx, "topic-a", handlerA) // Same topic as node1
+    
+    // Verify topic isolation across nodes
+    node1.Publish(ctx, "topic-a", messageA)  // Should reach node3, not node2
+    node2.Publish(ctx, "topic-b", messageB)  // Should not reach node1 or node3
+}
+```
+
+---
+
 ## Technology Stack
 
 ### Core Dependencies (Updated for DePIN)

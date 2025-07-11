@@ -609,6 +609,236 @@ func TestUnsubscribeFunctionality(t *testing.T) {
 	t.Log("✅ Unsubscribe functionality test PASSED")
 }
 
+// TestPublishThenSubscribeEdgeCase tests the specific edge case where:
+// - Nodes connect but NO initial subscriptions (pure edge case)
+// - Node publishes to a topic without subscribing first (joins topic for publishing only)
+// - Same node later subscribes to that topic (should reuse existing topic, not fail)
+// - Verify that subsequent messages are properly received after subscription
+func TestPublishThenSubscribeEdgeCase(t *testing.T) {
+	t.Log("=== Testing Publish-Then-Subscribe Edge Case ===")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	logger := &TestLogger{}
+	topic := "edge-case-topic"
+
+	// Use EXACT same ports as working test to eliminate any port-related issues
+	// Node 0 (Bootstrap) - will do publish-then-subscribe to test edge case
+	node0DB := setupNode(t, ctx, logger, node0PrivateKey, "test-network", 15001, 15002,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForBootstrap)
+	defer node0DB.Disconnect(ctx)
+
+	// DON'T subscribe Node 0 yet - this is the edge case we're testing!
+
+	time.Sleep(2 * time.Second)
+
+	// Node 1 (Client) - just connect, NO subscription initially
+	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+	defer node1DB.Disconnect(ctx)
+
+	// Node 2 (Client) - just connect, NO subscription initially
+	node2DB := setupNode(t, ctx, logger, node2PrivateKey, "test-network", 15005, 15006,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+	defer node2DB.Disconnect(ctx)
+
+	// Wait for network convergence (same as working tests)
+	time.Sleep(5 * time.Second)
+
+	// Verify nodes are connected - FAIL the test if not connected (don't skip)
+	node0Peers := node0DB.ConnectedPeers()
+	node1Peers := node1DB.ConnectedPeers()
+	node2Peers := node2DB.ConnectedPeers()
+	t.Logf("Node 0 connected to %d peers", len(node0Peers))
+	t.Logf("Node 1 connected to %d peers", len(node1Peers))
+	t.Logf("Node 2 connected to %d peers", len(node2Peers))
+
+	if len(node0Peers) < 2 || len(node1Peers) < 2 || len(node2Peers) < 2 {
+		t.Fatalf("CONNECTIVITY FAILURE: Nodes not properly connected. Expected each node to have 2 peers. Node0: %d, Node1: %d, Node2: %d. This test must not skip!",
+			len(node0Peers), len(node1Peers), len(node2Peers))
+	}
+
+	var receivedMessages []NodeMessage
+	var messagesMutex sync.Mutex
+
+	// Step 1: Node 0 publishes WITHOUT subscribing first (edge case)
+	t.Log("Step 1: Publishing without subscription...")
+	publishMessage := NodeMessage{
+		NodeID:  "node-0",
+		Content: "Published before subscribing",
+		Counter: 1,
+	}
+
+	_, err := node0DB.Publish(ctx, topic, publishMessage)
+	if err != nil {
+		t.Fatalf("Failed to publish without subscription: %v", err)
+	}
+	t.Log("✅ Successfully published without subscription")
+
+	// Step 2: Node 0 tries to subscribe AFTER publishing (this was the bug)
+	t.Log("Step 2: Subscribing after publishing...")
+
+	handler := func(event common.Event) {
+		messagesMutex.Lock()
+		defer messagesMutex.Unlock()
+
+		var msg NodeMessage
+		if jsonData, err := json.Marshal(event.Message); err == nil {
+			if err := json.Unmarshal(jsonData, &msg); err == nil {
+				receivedMessages = append(receivedMessages, msg)
+				t.Logf("Node 0 received message: %+v", msg)
+			}
+		}
+	}
+
+	err = node0DB.Subscribe(ctx, topic, handler)
+	if err != nil {
+		t.Fatalf("Failed to subscribe after publishing - this indicates the edge case bug: %v", err)
+	}
+	t.Log("✅ Successfully subscribed after publishing")
+
+	// Step 3: Now Node 1 subscribes to help establish GossipSub mesh for message delivery
+	t.Log("Step 3: Node 1 subscribing to establish mesh...")
+	err = node1DB.Subscribe(ctx, topic, func(event common.Event) {
+		// Node 1 handler (needed for GossipSub mesh)
+	})
+	if err != nil {
+		t.Fatalf("Node 1 subscription failed: %v", err)
+	}
+
+	// Wait for mesh to stabilize
+	time.Sleep(3 * time.Second)
+
+	// Step 4: Node 1 publishes a message that Node 0 should receive
+	t.Log("Step 4: Testing message delivery after edge case resolution...")
+
+	testMessage := NodeMessage{
+		NodeID:  "node-1",
+		Content: "Message after subscription established",
+		Counter: 2,
+	}
+
+	_, err = node1DB.Publish(ctx, topic, testMessage)
+	if err != nil {
+		t.Fatalf("Failed to publish test message: %v", err)
+	}
+	t.Log("Node 1 published test message")
+
+	// Wait for message delivery
+	time.Sleep(5 * time.Second)
+
+	// Step 5: Verify Node 0 received the message from Node 1
+	messagesMutex.Lock()
+	defer messagesMutex.Unlock()
+
+	if len(receivedMessages) != 1 {
+		t.Fatalf("Expected 1 message, got %d. Messages: %+v", len(receivedMessages), receivedMessages)
+	}
+
+	received := receivedMessages[0]
+	if received.NodeID != "node-1" {
+		t.Errorf("Expected message from node-1, got from %s", received.NodeID)
+	}
+	if received.Content != "Message after subscription established" {
+		t.Errorf("Expected specific content, got: %s", received.Content)
+	}
+	if received.Counter != 2 {
+		t.Errorf("Expected counter 2, got %d", received.Counter)
+	}
+
+	t.Log("✅ Edge case test PASSED")
+	t.Log("  - No initial subscriptions: Works")
+	t.Log("  - Publish without subscribe: Works")
+	t.Log("  - Subscribe after publish: Works (edge case fixed)")
+	t.Log("  - Message delivery after subscription: Works")
+}
+
+// TestBasicConnectivity tests that 3 nodes can connect to each other without any pub/sub operations
+func TestBasicConnectivity(t *testing.T) {
+	t.Log("=== Testing Basic 3-Node Connectivity ===")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	logger := &TestLogger{}
+
+	// Node 0 (Bootstrap) - just connect, no pub/sub
+	node0DB := setupNode(t, ctx, logger, node0PrivateKey, "test-network", 15001, 15002,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForBootstrap)
+	defer node0DB.Disconnect(ctx)
+
+	time.Sleep(2 * time.Second)
+
+	// Node 1 (Client) - just connect, no pub/sub
+	node1DB := setupNode(t, ctx, logger, node1PrivateKey, "test-network", 15003, 15004,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+	defer node1DB.Disconnect(ctx)
+
+	// Node 2 (Client) - just connect, no pub/sub
+	node2DB := setupNode(t, ctx, logger, node2PrivateKey, "test-network", 15005, 15006,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", node0DB.GetHost().ID().String()))
+	defer node2DB.Disconnect(ctx)
+
+	// Wait for network convergence
+	time.Sleep(5 * time.Second)
+
+	// Verify all nodes are connected to each other
+	node0Peers := node0DB.ConnectedPeers()
+	node1Peers := node1DB.ConnectedPeers()
+	node2Peers := node2DB.ConnectedPeers()
+
+	t.Logf("Node 0 connected to %d peers", len(node0Peers))
+	t.Logf("Node 1 connected to %d peers", len(node1Peers))
+	t.Logf("Node 2 connected to %d peers", len(node2Peers))
+
+	// Each node should be connected to the other 2 nodes
+	if len(node0Peers) != 2 {
+		t.Errorf("Node 0 should have 2 peers, got %d", len(node0Peers))
+	}
+	if len(node1Peers) != 2 {
+		t.Errorf("Node 1 should have 2 peers, got %d", len(node1Peers))
+	}
+	if len(node2Peers) != 2 {
+		t.Errorf("Node 2 should have 2 peers, got %d", len(node2Peers))
+	}
+
+	// Verify peer IDs match
+	expectedPeerIDs := map[string][]string{
+		node0DB.GetHost().ID().String(): {node1DB.GetHost().ID().String(), node2DB.GetHost().ID().String()},
+		node1DB.GetHost().ID().String(): {node0DB.GetHost().ID().String(), node2DB.GetHost().ID().String()},
+		node2DB.GetHost().ID().String(): {node0DB.GetHost().ID().String(), node1DB.GetHost().ID().String()},
+	}
+
+	nodes := []*pubsub.DB{node0DB, node1DB, node2DB}
+	nodeNames := []string{"Node 0", "Node 1", "Node 2"}
+
+	for i, node := range nodes {
+		peers := node.ConnectedPeers()
+		nodeID := node.GetHost().ID().String()
+		expectedPeers := expectedPeerIDs[nodeID]
+
+		for _, peer := range peers {
+			peerID := peer.ID.String()
+			found := false
+			for _, expectedPeerID := range expectedPeers {
+				if peerID == expectedPeerID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("%s connected to unexpected peer: %s", nodeNames[i], peerID)
+			}
+		}
+	}
+
+	t.Log("✅ Basic connectivity test PASSED")
+	t.Log("  - All 3 nodes connected to each other")
+	t.Log("  - No pub/sub operations required")
+	t.Log("  - Pure P2P network connectivity verified")
+}
+
 // Helper functions
 
 func setupNode(t *testing.T, ctx context.Context, logger common.Logger, privateKey, dbName string,

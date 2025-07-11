@@ -8,6 +8,7 @@ import (
 
 	"github.com/dtelecom/p2p-pubsub/common"
 	"github.com/google/uuid"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
@@ -21,15 +22,30 @@ func (db *DB) Subscribe(ctx context.Context, topic string, handler common.PubSub
 	// Create topic name with database namespace
 	topicName := fmt.Sprintf("%s_%s", db.instance.name, topic)
 
-	// Check if already subscribed
-	if _, exists := db.instance.subscriptions[topic]; exists {
-		return fmt.Errorf("already subscribed to topic: %s", topic)
+	// Check if already subscribed with a handler
+	if existingSub, exists := db.instance.subscriptions[topic]; exists {
+		if existingSub.handler != nil {
+			return fmt.Errorf("already subscribed to topic: %s", topic)
+		}
+		// If subscription exists but no handler, we can allow re-subscription
+		// This handles the case where a topic was joined for publishing only
 	}
 
-	// Join the topic
-	pubsubTopic, err := db.infrastructure.gossipSub.Join(topicName)
-	if err != nil {
-		return fmt.Errorf("failed to join topic %s: %w", topicName, err)
+	// Get or join the topic (handle case where topic was already joined for publishing)
+	var pubsubTopic *pubsub.Topic
+	var err error
+
+	if existingTopic, exists := db.instance.topics[topic]; exists {
+		// Topic already joined (likely from publishing), reuse it
+		pubsubTopic = existingTopic
+	} else {
+		// Topic not joined yet, join it now
+		pubsubTopic, err = db.infrastructure.gossipSub.Join(topicName)
+		if err != nil {
+			return fmt.Errorf("failed to join topic %s: %w", topicName, err)
+		}
+		// Store the topic for future use
+		db.instance.topics[topic] = pubsubTopic
 	}
 
 	// Subscribe to the topic
@@ -51,7 +67,6 @@ func (db *DB) Subscribe(ctx context.Context, topic string, handler common.PubSub
 	}
 
 	// Store the subscription
-	db.instance.topics[topic] = pubsubTopic
 	db.instance.subscriptions[topic] = topicSub
 
 	// Start discovery for this database if it's the first topic
