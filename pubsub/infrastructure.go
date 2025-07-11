@@ -36,6 +36,7 @@ type P2PInfrastructure struct {
 	readinessMutex    sync.RWMutex                 // Protects isReady
 	getBootstrapNodes common.GetBootstrapNodesFunc // Bootstrap function for retry attempts
 	retryCancel       context.CancelFunc           // Cancel function for bootstrap retry goroutine
+	retryMutex        sync.Mutex                   // Protects retryCancel
 }
 
 // DatabaseInstance represents a database instance with isolated topics
@@ -83,6 +84,25 @@ func (infra *P2PInfrastructure) updateReadiness() {
 		infra.logger.Info("Node became ready", "peer_count", peerCount)
 	} else if wasReady && !infra.isReady {
 		infra.logger.Info("Node no longer ready", "peer_count", peerCount)
+		// Start bootstrap retry when node becomes not ready
+		go infra.startBootstrapRetryAfterDelay()
+	}
+}
+
+// startBootstrapRetryAfterDelay starts bootstrap retry after a short delay
+// This is used when a node loses all peers and becomes not ready
+func (infra *P2PInfrastructure) startBootstrapRetryAfterDelay() {
+	// Wait a bit before starting retry to avoid immediate reconnection attempts
+	time.Sleep(2 * time.Second)
+
+	infra.readinessMutex.RLock()
+	stillNotReady := !infra.isReady
+	infra.readinessMutex.RUnlock()
+
+	if stillNotReady {
+		infra.logger.Info("Node still not ready after delay, starting bootstrap retry")
+		ctx := context.Background()
+		infra.startBootstrapRetry(ctx)
 	}
 }
 
@@ -335,12 +355,27 @@ func bootstrapNetworkWithRetry(ctx context.Context, infra *P2PInfrastructure) er
 
 // startBootstrapRetry starts a goroutine that retries bootstrap every 5 seconds until ready
 func (infra *P2PInfrastructure) startBootstrapRetry(parentCtx context.Context) {
+	// Check if retry is already running (with proper synchronization)
+	infra.retryMutex.Lock()
+	if infra.retryCancel != nil {
+		infra.retryMutex.Unlock()
+		infra.logger.Debug("Bootstrap retry already running, not starting another")
+		return
+	}
+
 	// Create cancelable context for the retry goroutine
 	retryCtx, cancel := context.WithCancel(parentCtx)
 	infra.retryCancel = cancel
+	infra.retryMutex.Unlock()
 
 	go func() {
-		defer cancel()
+		defer func() {
+			cancel()
+			// Clear the cancel function when goroutine exits (with proper synchronization)
+			infra.retryMutex.Lock()
+			infra.retryCancel = nil
+			infra.retryMutex.Unlock()
+		}()
 
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -389,6 +424,9 @@ func (infra *P2PInfrastructure) startBootstrapRetry(parentCtx context.Context) {
 
 // stopBootstrapRetry stops the bootstrap retry goroutine if it's running
 func (infra *P2PInfrastructure) stopBootstrapRetry() {
+	infra.retryMutex.Lock()
+	defer infra.retryMutex.Unlock()
+
 	if infra.retryCancel != nil {
 		infra.logger.Debug("Stopping bootstrap retry goroutine")
 		infra.retryCancel()

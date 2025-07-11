@@ -1692,6 +1692,243 @@ func TestBootstrapRetryStopsWhenReady(t *testing.T) {
 	t.Log("✅ Bootstrap retry stop test passed")
 }
 
+// TestBootstrapNodeFailover tests network resilience when bootstrap nodes go down and new ones come online
+func TestBootstrapNodeFailover(t *testing.T) {
+	t.Log("=== Testing Bootstrap Node Failover Scenario ===")
+	t.Log("Scenario: Node0+Node1 start → Node0 down → Node2 up → Node1+Node2 work")
+
+	logger := &TestLogger{}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Create bootstrap functions that support both Node0 and Node2 as bootstrap
+	// Node1 will try Node0 first, then Node2 if Node0 is down
+	multiBootstrapFunc := func(ctx context.Context) ([]common.BootstrapNode, error) {
+		return []common.BootstrapNode{
+			{
+				PublicKey: solana.MustPublicKeyFromBase58(node0PublicKey),
+				IP:        "127.0.0.1",
+				QUICPort:  15001,
+				TCPPort:   15002,
+			},
+			{
+				PublicKey: solana.MustPublicKeyFromBase58(node2PublicKey),
+				IP:        "127.0.0.1",
+				QUICPort:  15005,
+				TCPPort:   15006,
+			},
+		}, nil
+	}
+
+	// === Phase 1: Node0 and Node1 start ===
+	t.Log("Phase 1: Starting Node0 (bootstrap) and Node1 (client)")
+
+	// Start Node0 (bootstrap)
+	node0Config := common.Config{
+		WalletPrivateKey:     node0PrivateKey,
+		DatabaseName:         "test-failover",
+		GetAuthorizedWallets: mockGetAuthorizedWallets,
+		GetBootstrapNodes:    mockGetBootstrapNodesForBootstrap, // Returns empty
+		Logger:               logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 15001,
+			TCP:  15002,
+		},
+	}
+
+	node0DB, err := pubsub.Connect(ctx, node0Config)
+	if err != nil {
+		t.Fatalf("Failed to connect Node0: %v", err)
+	}
+	// Note: We'll manually disconnect node0 later, so no defer here initially
+
+	// Start Node1 (client) - uses both Node0 and Node2 as potential bootstrap
+	node1Config := common.Config{
+		WalletPrivateKey:     node1PrivateKey,
+		DatabaseName:         "test-failover",
+		GetAuthorizedWallets: mockGetAuthorizedWallets,
+		GetBootstrapNodes:    multiBootstrapFunc,
+		Logger:               logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 15003,
+			TCP:  15004,
+		},
+	}
+
+	node1DB, err := pubsub.Connect(ctx, node1Config)
+	if err != nil {
+		t.Fatalf("Failed to connect Node1: %v", err)
+	}
+	defer func() { _ = node1DB.Disconnect(ctx) }()
+
+	// Wait for Node0 and Node1 to connect
+	time.Sleep(5 * time.Second)
+
+	// Verify Phase 1: Node0 and Node1 are connected
+	node0Peers := len(node0DB.GetHost().Network().Peers())
+	node1Peers := len(node1DB.GetHost().Network().Peers())
+
+	t.Logf("Phase 1 - Node0 peers: %d, Node1 peers: %d", node0Peers, node1Peers)
+
+	if node0Peers < 1 || node1Peers < 1 {
+		t.Errorf("Phase 1 failed: Node0 and Node1 should be connected, got Node0: %d, Node1: %d peers", node0Peers, node1Peers)
+	}
+
+	// Test communication in Phase 1
+	t.Log("Testing Phase 1 communication...")
+	testTopic := "failover-test"
+	phase1Messages := make([]string, 0)
+	var phase1Mutex sync.Mutex
+
+	err = node1DB.Subscribe(ctx, testTopic, func(event common.Event) {
+		phase1Mutex.Lock()
+		phase1Messages = append(phase1Messages, fmt.Sprintf("Phase1: %v", event.Message))
+		phase1Mutex.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("Phase 1 subscribe failed: %v", err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	_, err = node0DB.Publish(ctx, testTopic, "Phase1: Hello from Node0")
+	if err != nil {
+		t.Fatalf("Phase 1 publish failed: %v", err)
+	}
+
+	time.Sleep(3 * time.Second)
+
+	phase1Mutex.Lock()
+	phase1Count := len(phase1Messages)
+	phase1Mutex.Unlock()
+
+	if phase1Count < 1 {
+		t.Errorf("Phase 1 communication failed: expected 1+ messages, got %d", phase1Count)
+	}
+
+	t.Log("✅ Phase 1 successful: Node0 and Node1 working together")
+
+	// === Phase 2: Node0 goes down ===
+	t.Log("Phase 2: Taking Node0 down...")
+
+	err = node0DB.Disconnect(ctx)
+	if err != nil {
+		t.Logf("Note: Node0 disconnect had error: %v", err)
+	}
+	node0DB = nil
+
+	// Wait for Node1 to detect Node0 is gone
+	time.Sleep(3 * time.Second)
+
+	// Verify Node1 is no longer connected to Node0
+	node1PeersAfterNode0Down := len(node1DB.GetHost().Network().Peers())
+	t.Logf("Phase 2 - Node1 peers after Node0 down: %d", node1PeersAfterNode0Down)
+
+	if node1PeersAfterNode0Down > 0 {
+		t.Log("Note: Node1 still shows peers after Node0 down - may take time to detect disconnect")
+	}
+
+	t.Log("✅ Phase 2 successful: Node0 down")
+
+	// === Phase 3: Node2 comes up ===
+	t.Log("Phase 3: Starting Node2 (new bootstrap)...")
+
+	// Start Node2 (new bootstrap)
+	node2Config := common.Config{
+		WalletPrivateKey:     node2PrivateKey,
+		DatabaseName:         "test-failover",
+		GetAuthorizedWallets: mockGetAuthorizedWallets,
+		GetBootstrapNodes:    multiBootstrapFunc, // Node2 can also use Node1 as bootstrap
+		Logger:               logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 15005,
+			TCP:  15006,
+		},
+	}
+
+	node2DB, err := pubsub.Connect(ctx, node2Config)
+	if err != nil {
+		t.Fatalf("Failed to connect Node2: %v", err)
+	}
+	defer func() { _ = node2DB.Disconnect(ctx) }()
+
+	// Wait for Node1 and Node2 to find each other
+	// Node1 should retry bootstrap and find Node2
+	t.Log("Waiting for Node1 and Node2 to discover each other...")
+
+	startTime := time.Now()
+	timeout := 20 * time.Second
+	connected := false
+
+	for time.Since(startTime) < timeout {
+		node1Peers = len(node1DB.GetHost().Network().Peers())
+		node2Peers := len(node2DB.GetHost().Network().Peers())
+
+		if node1Peers >= 1 && node2Peers >= 1 {
+			connected = true
+			t.Logf("✅ Node1 and Node2 discovered each other after %v", time.Since(startTime))
+			break
+		}
+
+		time.Sleep(1 * time.Second)
+	}
+
+	if !connected {
+		t.Errorf("Phase 3 failed: Node1 and Node2 failed to discover each other within %v", timeout)
+	}
+
+	// === Phase 4: Test Node1 and Node2 communication ===
+	t.Log("Phase 4: Testing Node1 and Node2 communication...")
+
+	phase4Messages := make([]string, 0)
+	var phase4Mutex sync.Mutex
+
+	// Node2 subscribes to receive messages from Node1
+	err = node2DB.Subscribe(ctx, testTopic, func(event common.Event) {
+		phase4Mutex.Lock()
+		phase4Messages = append(phase4Messages, fmt.Sprintf("Phase4: %v", event.Message))
+		phase4Mutex.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("Phase 4 subscribe failed: %v", err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// Node1 publishes to Node2
+	_, err = node1DB.Publish(ctx, testTopic, "Phase4: Hello from Node1 to Node2")
+	if err != nil {
+		t.Fatalf("Phase 4 publish failed: %v", err)
+	}
+
+	time.Sleep(3 * time.Second)
+
+	phase4Mutex.Lock()
+	phase4Count := len(phase4Messages)
+	phase4Mutex.Unlock()
+
+	if phase4Count < 1 {
+		t.Errorf("Phase 4 communication failed: expected 1+ messages, got %d", phase4Count)
+	}
+
+	// === Final Verification ===
+	finalNode1Peers := len(node1DB.GetHost().Network().Peers())
+	finalNode2Peers := len(node2DB.GetHost().Network().Peers())
+
+	t.Logf("Final verification - Node1 peers: %d, Node2 peers: %d", finalNode1Peers, finalNode2Peers)
+
+	if finalNode1Peers < 1 || finalNode2Peers < 1 {
+		t.Errorf("Final verification failed: Node1 and Node2 should be connected, got Node1: %d, Node2: %d peers", finalNode1Peers, finalNode2Peers)
+	}
+
+	t.Log("✅ Bootstrap node failover test PASSED")
+	t.Log("  Phase 1: ✅ Node0 + Node1 working")
+	t.Log("  Phase 2: ✅ Node0 down")
+	t.Log("  Phase 3: ✅ Node2 up and discovered")
+	t.Log("  Phase 4: ✅ Node1 + Node2 working")
+	t.Log("  Network successfully healed after bootstrap node failure!")
+}
+
 // TestLogger is a simple test logger
 type TestLogger struct{}
 
