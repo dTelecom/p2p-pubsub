@@ -17,6 +17,10 @@ all: clean deps fmt check test
 clean:
 	$(GOCLEAN)
 
+# Clean test cache
+clean-test:
+	$(GOCLEAN) -testcache
+
 # Run tests
 test:
 	$(GOTEST) -v ./...
@@ -115,6 +119,7 @@ help:
 	@echo "Available targets:"
 	@echo "  all              - Clean, deps, fmt, check, and test"
 	@echo "  clean            - Clean build artifacts"
+	@echo "  clean-test       - Clean test cache"
 	@echo "  test             - Run tests"
 	@echo "  test-coverage    - Run tests with coverage report"
 	@echo "  test-race        - Run tests with race detection"
