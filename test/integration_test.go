@@ -2097,3 +2097,288 @@ func TestClientStartsBeforeBootstrap(t *testing.T) {
 
 	t.Log("=== Client Starts Before Bootstrap Test Complete ===")
 }
+
+// TestAllNodesBootstrapAndAuthorized tests the scenario where all nodes are both
+// bootstrap and authorized nodes, and each node knows about all other nodes
+func TestAllNodesBootstrapAndAuthorized(t *testing.T) {
+	t.Log("=== Testing All Nodes as Bootstrap and Authorized ===")
+	t.Log("Scenario: Node0, Node1, Node2 - all bootstrap and authorized")
+	t.Log("Each node receives all 3 nodes as bootstrap and authorized options")
+
+	logger := &TestLogger{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Create bootstrap function that returns all 3 nodes as bootstrap options
+	allNodesBootstrapFunc := func(ctx context.Context) ([]common.BootstrapNode, error) {
+		return []common.BootstrapNode{
+			{
+				PublicKey: solana.MustPublicKeyFromBase58(node0PublicKey),
+				IP:        "127.0.0.1",
+				QUICPort:  17001,
+				TCPPort:   17002,
+			},
+			{
+				PublicKey: solana.MustPublicKeyFromBase58(node1PublicKey),
+				IP:        "127.0.0.1",
+				QUICPort:  17003,
+				TCPPort:   17004,
+			},
+			{
+				PublicKey: solana.MustPublicKeyFromBase58(node2PublicKey),
+				IP:        "127.0.0.1",
+				QUICPort:  17005,
+				TCPPort:   17006,
+			},
+		}, nil
+	}
+
+	// Create authorized wallets function that returns all 3 nodes as authorized
+	allNodesAuthorizedFunc := func(ctx context.Context) ([]solana.PublicKey, error) {
+		return []solana.PublicKey{
+			solana.MustPublicKeyFromBase58(node0PublicKey),
+			solana.MustPublicKeyFromBase58(node1PublicKey),
+			solana.MustPublicKeyFromBase58(node2PublicKey),
+		}, nil
+	}
+
+	// === Phase 1: Start all three nodes ===
+	t.Log("Phase 1: Starting all three nodes with full network knowledge")
+
+	// Start Node 0
+	node0Config := common.Config{
+		WalletPrivateKey:     node0PrivateKey,
+		DatabaseName:         "test-all-nodes",
+		GetAuthorizedWallets: allNodesAuthorizedFunc,
+		GetBootstrapNodes:    allNodesBootstrapFunc,
+		Logger:               logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 17001,
+			TCP:  17002,
+		},
+	}
+
+	node0DB, err := pubsub.Connect(ctx, node0Config)
+	if err != nil {
+		t.Fatalf("Failed to connect Node0: %v", err)
+	}
+	defer func() { _ = node0DB.Disconnect(ctx) }()
+
+	// Start Node 1
+	node1Config := common.Config{
+		WalletPrivateKey:     node1PrivateKey,
+		DatabaseName:         "test-all-nodes",
+		GetAuthorizedWallets: allNodesAuthorizedFunc,
+		GetBootstrapNodes:    allNodesBootstrapFunc,
+		Logger:               logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 17003,
+			TCP:  17004,
+		},
+	}
+
+	node1DB, err := pubsub.Connect(ctx, node1Config)
+	if err != nil {
+		t.Fatalf("Failed to connect Node1: %v", err)
+	}
+	defer func() { _ = node1DB.Disconnect(ctx) }()
+
+	// Start Node 2
+	node2Config := common.Config{
+		WalletPrivateKey:     node2PrivateKey,
+		DatabaseName:         "test-all-nodes",
+		GetAuthorizedWallets: allNodesAuthorizedFunc,
+		GetBootstrapNodes:    allNodesBootstrapFunc,
+		Logger:               logger,
+		ListenPorts: common.ListenPorts{
+			QUIC: 17005,
+			TCP:  17006,
+		},
+	}
+
+	node2DB, err := pubsub.Connect(ctx, node2Config)
+	if err != nil {
+		t.Fatalf("Failed to connect Node2: %v", err)
+	}
+	defer func() { _ = node2DB.Disconnect(ctx) }()
+
+	// Wait for network convergence
+	t.Log("Waiting for network convergence...")
+	time.Sleep(10 * time.Second)
+
+	// === Phase 2: Verify all nodes are connected ===
+	t.Log("Phase 2: Verifying all nodes are connected to each other")
+
+	// Check peer counts
+	node0Peers := len(node0DB.GetHost().Network().Peers())
+	node1Peers := len(node1DB.GetHost().Network().Peers())
+	node2Peers := len(node2DB.GetHost().Network().Peers())
+
+	t.Logf("Node 0 peers: %d", node0Peers)
+	t.Logf("Node 1 peers: %d", node1Peers)
+	t.Logf("Node 2 peers: %d", node2Peers)
+
+	// Each node should be connected to 2 other nodes
+	if node0Peers < 2 || node1Peers < 2 || node2Peers < 2 {
+		t.Errorf("Not all nodes are fully connected: Node0=%d, Node1=%d, Node2=%d peers",
+			node0Peers, node1Peers, node2Peers)
+	}
+
+	// Verify all nodes are ready
+	if !node0DB.IsReady() {
+		t.Error("Node 0 is not ready")
+	}
+	if !node1DB.IsReady() {
+		t.Error("Node 1 is not ready")
+	}
+	if !node2DB.IsReady() {
+		t.Error("Node 2 is not ready")
+	}
+
+	t.Log("✅ All nodes are connected and ready")
+
+	// === Phase 3: Test pub/sub communication ===
+	t.Log("Phase 3: Testing pub/sub communication between all nodes")
+
+	testTopic := "all-nodes-test"
+
+	// Set up message handlers
+	var (
+		node0Received []string
+		node1Received []string
+		node2Received []string
+		mu            sync.RWMutex
+	)
+
+	node0Handler := func(event common.Event) {
+		mu.Lock()
+		node0Received = append(node0Received, fmt.Sprintf("%v", event.Message))
+		mu.Unlock()
+	}
+
+	node1Handler := func(event common.Event) {
+		mu.Lock()
+		node1Received = append(node1Received, fmt.Sprintf("%v", event.Message))
+		mu.Unlock()
+	}
+
+	node2Handler := func(event common.Event) {
+		mu.Lock()
+		node2Received = append(node2Received, fmt.Sprintf("%v", event.Message))
+		mu.Unlock()
+	}
+
+	// Subscribe all nodes
+	err = node0DB.Subscribe(ctx, testTopic, node0Handler)
+	if err != nil {
+		t.Fatalf("Failed to subscribe Node0: %v", err)
+	}
+
+	err = node1DB.Subscribe(ctx, testTopic, node1Handler)
+	if err != nil {
+		t.Fatalf("Failed to subscribe Node1: %v", err)
+	}
+
+	err = node2DB.Subscribe(ctx, testTopic, node2Handler)
+	if err != nil {
+		t.Fatalf("Failed to subscribe Node2: %v", err)
+	}
+
+	// Wait for subscriptions to propagate
+	time.Sleep(3 * time.Second)
+
+	// Test bidirectional communication - each node publishes a message
+	nodes := []*pubsub.DB{node0DB, node1DB, node2DB}
+	nodeNames := []string{"Node0", "Node1", "Node2"}
+
+	for i, node := range nodes {
+		message := map[string]interface{}{
+			"from":    nodeNames[i],
+			"message": fmt.Sprintf("Hello from %s to all nodes", nodeNames[i]),
+			"counter": i + 1,
+		}
+
+		_, err = node.Publish(ctx, testTopic, message)
+		if err != nil {
+			t.Fatalf("Failed to publish from %s: %v", nodeNames[i], err)
+		}
+
+		t.Logf("✅ %s published message", nodeNames[i])
+		time.Sleep(1 * time.Second)
+	}
+
+	// Wait for message propagation
+	time.Sleep(5 * time.Second)
+
+	// Verify message reception
+	mu.RLock()
+	defer mu.RUnlock()
+
+	t.Logf("Node 0 received %d messages", len(node0Received))
+	t.Logf("Node 1 received %d messages", len(node1Received))
+	t.Logf("Node 2 received %d messages", len(node2Received))
+
+	// Each node should receive 2 messages (from the other 2 nodes)
+	if len(node0Received) < 2 {
+		t.Errorf("Node 0 received insufficient messages: %d (expected 2+)", len(node0Received))
+	}
+	if len(node1Received) < 2 {
+		t.Errorf("Node 1 received insufficient messages: %d (expected 2+)", len(node1Received))
+	}
+	if len(node2Received) < 2 {
+		t.Errorf("Node 2 received insufficient messages: %d (expected 2+)", len(node2Received))
+	}
+
+	// === Phase 4: Test network resilience ===
+	t.Log("Phase 4: Testing network resilience - disconnect and reconnect")
+
+	// Disconnect Node 1
+	t.Log("Disconnecting Node 1...")
+	err = node1DB.Disconnect(ctx)
+	if err != nil {
+		t.Logf("Note: Node1 disconnect had error: %v", err)
+	}
+
+	// Wait for disconnection to be detected
+	time.Sleep(3 * time.Second)
+
+	// Check that Node 0 and Node 2 are still connected
+	node0PeersAfterDisconnect := len(node0DB.GetHost().Network().Peers())
+	node2PeersAfterDisconnect := len(node2DB.GetHost().Network().Peers())
+
+	t.Logf("After Node1 disconnect - Node0 peers: %d, Node2 peers: %d",
+		node0PeersAfterDisconnect, node2PeersAfterDisconnect)
+
+	if node0PeersAfterDisconnect < 1 || node2PeersAfterDisconnect < 1 {
+		t.Error("Node 0 and Node 2 should still be connected after Node 1 disconnects")
+	}
+
+	// Reconnect Node 1
+	t.Log("Reconnecting Node 1...")
+	node1DB, err = pubsub.Connect(ctx, node1Config)
+	if err != nil {
+		t.Fatalf("Failed to reconnect Node1: %v", err)
+	}
+	defer func() { _ = node1DB.Disconnect(ctx) }()
+
+	// Wait for reconnection
+	time.Sleep(5 * time.Second)
+
+	// Verify all nodes are connected again
+	finalNode0Peers := len(node0DB.GetHost().Network().Peers())
+	finalNode1Peers := len(node1DB.GetHost().Network().Peers())
+	finalNode2Peers := len(node2DB.GetHost().Network().Peers())
+
+	t.Logf("Final peer counts - Node0: %d, Node1: %d, Node2: %d",
+		finalNode0Peers, finalNode1Peers, finalNode2Peers)
+
+	if finalNode0Peers < 2 || finalNode1Peers < 2 || finalNode2Peers < 2 {
+		t.Error("Not all nodes reconnected properly after Node 1 reconnection")
+	}
+
+	t.Log("✅ All Nodes as Bootstrap and Authorized Test Complete")
+	t.Log("  - All nodes successfully connected to each other")
+	t.Log("  - Pub/sub communication works between all nodes")
+	t.Log("  - Network shows resilience to node disconnections")
+	t.Log("  - Self-information as bootstrap/authorized works correctly")
+}
