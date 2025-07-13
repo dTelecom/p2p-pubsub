@@ -17,13 +17,12 @@ import (
 type SolanaRegistryGater struct {
 	getAuthorizedWallets GetAuthorizedWalletsFunc // Function provided by node software
 	logger               Logger                   // Logger instance
-	cache                *AuthorizationCache      // Peer authorization cache for performance
+	cache                *AuthorizationCache      // Wallet authorization cache for performance
 }
 
-// AuthorizationCache provides simple caching for peer authorization
+// AuthorizationCache provides simple caching for wallet authorization
 type AuthorizationCache struct {
 	walletAuthorizations sync.Map // solana.PublicKey -> bool
-	peerAuthorizations   sync.Map // peer.ID -> bool
 	mutex                sync.RWMutex
 }
 
@@ -108,33 +107,20 @@ func (g *SolanaRegistryGater) InterceptUpgraded(network.Conn) (allow bool, reaso
 
 // isAuthorizedPeer checks if a peer is authorized by looking up its wallet in the registry
 func (g *SolanaRegistryGater) isAuthorizedPeer(ctx context.Context, peerID peer.ID) (bool, error) {
-	// Check cache first
-	if cached, found := g.cache.peerAuthorizations.Load(peerID); found {
-		g.logger.Debug("Found cached peer authorization",
-			"peer_id", peerID.String(),
-			"authorized", cached.(bool))
-		return cached.(bool), nil
-	}
-
 	// Extract Solana public key from peer ID
 	solanaPublicKey, err := PeerIDToSolanaPublicKey(peerID)
 	if err != nil {
 		g.logger.Debug("Failed to extract Solana public key from peer ID",
 			"peer_id", peerID.String(),
 			"error", err.Error())
-		// Cache negative result
-		g.cache.peerAuthorizations.Store(peerID, false)
 		return false, err
 	}
 
-	// Check wallet authorization
+	// Check wallet authorization (this will use the wallet cache)
 	authorized, err := g.checkWalletInRegistry(ctx, solanaPublicKey)
 	if err != nil {
 		return false, fmt.Errorf("failed to check wallet in registry: %w", err)
 	}
-
-	// Cache the result
-	g.cache.peerAuthorizations.Store(peerID, authorized)
 
 	g.logger.Debug("Checked peer authorization against registry",
 		"peer_id", peerID.String(),
@@ -186,6 +172,5 @@ func (g *SolanaRegistryGater) ClearCache() {
 	defer g.cache.mutex.Unlock()
 
 	g.cache.walletAuthorizations = sync.Map{}
-	g.cache.peerAuthorizations = sync.Map{}
 	g.logger.Debug("Cleared authorization cache")
 }
