@@ -469,143 +469,269 @@ func createDatabaseInstance(infra *P2PInfrastructure, config Config) (*DB, error
 
 ---
 
-## API Interfaces
+## Bootstrap Retry & Network Resilience Architecture
 
-### Core Library Interface
+### **Overview**
+
+The system implements robust bootstrap retry mechanisms to ensure network connectivity in dynamic DePIN environments where nodes may start in any order and network conditions may be unstable.
+
+### **Readiness State Management**
+
+#### **Node Readiness Tracking**
 ```go
-// Primary connection function with registry function
-func Connect(ctx context.Context, config Config) (*DB, error)
-
-// Pub/Sub operations (no additional authorization - connection-level gating only)
-func (db *DB) Subscribe(ctx context.Context, topic string, handler PubSubHandler) error
-func (db *DB) Publish(ctx context.Context, topic string, value interface{}) (Event, error)
-
-// Network information
-func (db *DB) ConnectedPeers() []*peer.AddrInfo
-func (db *DB) GetHost() host.Host
-
-// Lifecycle management  
-func (db *DB) Disconnect(ctx context.Context) error
-```
-
-### HTTP API (cmd/p2p-node)
-```http
-POST /subscribe          # Subscribe to topic
-POST /publish            # Publish message  
-GET  /status             # Node status
-GET  /peers              # Connected peers
-GET  /messages           # Retrieve received messages
-GET  /health             # Health check
-```
-
-**Note**: Registry management endpoints (`/registry/*`) are handled by the node software, not the pubsub library.
-
-### Event Handler Interface
-```go
-type PubSubHandler func(Event)
-
-type Event struct {
-    ID         string      // Unique message identifier
-    FromPeerId string      // Sender's peer ID  
-    Message    interface{} // Message payload (any JSON-serializable data)
-    Timestamp  int64       // Unix timestamp
+type P2PInfrastructure struct {
+    // Readiness and bootstrap retry state
+    isReady           bool                         // True when node has at least 1 peer connected
+    readinessMutex    sync.RWMutex                 // Protects isReady
+    getBootstrapNodes common.GetBootstrapNodesFunc // Bootstrap function for retry attempts
+    retryCancel       context.CancelFunc           // Cancel function for bootstrap retry goroutine
+    retryMutex        sync.Mutex                   // Protects retryCancel
+    
+    // Shutdown handling
+    shutdownCtx    context.Context    // Context that gets cancelled during shutdown
+    shutdownCancel context.CancelFunc // Cancel function for shutdown
 }
 ```
 
----
+#### **Readiness State Transitions**
+1. **Initial State**: `isReady = false` (no peers connected)
+2. **Peer Connected**: `isReady = true` (at least 1 peer connected)
+3. **All Peers Lost**: `isReady = false` → triggers bootstrap retry
+4. **Peer Reconnected**: `isReady = true` → stops bootstrap retry
 
-## Message Delivery Behavior
+### **Bootstrap Retry Mechanisms**
 
-### Self-Message Filtering
-
-**Critical Implementation Detail**: Nodes **ALWAYS** skip messages they send themselves to prevent echo loops in the distributed network.
-
+#### **Initial Bootstrap with Retry**
 ```go
-// In messageListener goroutine (pubsub_operations.go)
-if msg.ReceivedFrom == db.infrastructure.host.ID() {
-    continue  // Always skip own messages - no exceptions
+func bootstrapNetworkWithRetry(ctx context.Context, infra *P2PInfrastructure) error {
+    // Check bootstrap nodes availability first
+    bootstrapNodes, err := infra.getBootstrapNodes(ctx)
+    if err != nil {
+        return fmt.Errorf("failed to get bootstrap nodes: %w", err)
+    }
+
+    if len(bootstrapNodes) == 0 {
+        // No bootstrap nodes available, start retry process
+        infra.logger.Info("No bootstrap nodes available, starting retry process")
+        infra.startBootstrapRetry(infra.shutdownCtx)
+        return nil // Don't return error, we'll retry
+    }
+
+    // Bootstrap nodes are available, try normal bootstrap
+    err = bootstrapNetwork(ctx, infra.host, infra.dht, infra.getBootstrapNodes, infra.logger)
+    if err != nil {
+        // Bootstrap failed, start retry process to keep trying
+        infra.logger.Warn("Initial bootstrap failed, starting retry process", "error", err.Error())
+        infra.startBootstrapRetry(infra.shutdownCtx)
+        return nil // Don't return error, we'll retry
+    }
+
+    // Bootstrap succeeded
+    infra.logger.Info("Initial bootstrap successful")
+    return nil
 }
 ```
 
-**Why This Matters:**
-- **Echo Prevention**: Without self-filtering, nodes would receive their own messages infinitely
-- **Network Efficiency**: Prevents unnecessary message processing and storage
-- **Consistent Behavior**: All P2P networks implement this fundamental rule
-
-**Developer Implications:**
-- **Single-Node Testing**: Cannot verify message delivery with only one node
-- **Multi-Node Requirement**: Message delivery verification requires at least 2 nodes
-- **Handler Behavior**: Message handlers will never receive messages published by the same node
-
-### Testing Requirements
-
-**Minimum Node Count for Testing**: All tests verifying message delivery must use **at least 2 nodes**.
-
-#### ✅ Correct Test Pattern
+#### **Automatic Retry Loop**
 ```go
-func TestMessageDelivery(t *testing.T) {
-    // Create at least 2 nodes
-    node1 := setupNode(t, config1)
-    node2 := setupNode(t, config2)
-    
-    // Subscribe on receiving node
-    node2.Subscribe(ctx, "test-topic", handler)
-    
-    // Publish from sending node  
-    node1.Publish(ctx, "test-topic", message)
-    
-    // Verify node2 received the message from node1
-    verifyMessageReceived(t, receivedMessages)
+func (infra *P2PInfrastructure) startBootstrapRetry(parentCtx context.Context) {
+    // Check if shutdown is in progress
+    select {
+    case <-infra.shutdownCtx.Done():
+        infra.logger.Debug("Shutdown in progress, not starting bootstrap retry")
+        return
+    default:
+    }
+
+    // Check if retry is already running (with proper synchronization)
+    infra.retryMutex.Lock()
+    if infra.retryCancel != nil {
+        infra.retryMutex.Unlock()
+        infra.logger.Debug("Bootstrap retry already running, not starting another")
+        return
+    }
+
+    // Create cancelable context for the retry goroutine
+    retryCtx, cancel := context.WithCancel(parentCtx)
+    infra.retryCancel = cancel
+    infra.retryMutex.Unlock()
+
+    go func() {
+        defer func() {
+            cancel()
+            // Clear the cancel function when goroutine exits
+            infra.retryMutex.Lock()
+            infra.retryCancel = nil
+            infra.retryMutex.Unlock()
+        }()
+
+        ticker := time.NewTicker(5 * time.Second)
+        defer ticker.Stop()
+
+        infra.logger.Info("Starting bootstrap retry loop (every 5 seconds)")
+
+        for {
+            select {
+            case <-retryCtx.Done():
+                infra.logger.Debug("Bootstrap retry loop cancelled")
+                return
+            case <-infra.shutdownCtx.Done():
+                infra.logger.Debug("Bootstrap retry loop cancelled due to shutdown")
+                return
+            case <-ticker.C:
+                // Check if node is already ready (has peers)
+                if infra.IsReady() {
+                    infra.logger.Info("Node is ready, stopping bootstrap retry")
+                    return
+                }
+
+                // Try to get bootstrap nodes
+                bootstrapNodes, err := infra.getBootstrapNodes(retryCtx)
+                if err != nil {
+                    infra.logger.Warn("Failed to get bootstrap nodes during retry", "error", err.Error())
+                    continue
+                }
+
+                if len(bootstrapNodes) == 0 {
+                    infra.logger.Debug("Still no bootstrap nodes available, will retry")
+                    continue
+                }
+
+                // Found bootstrap nodes, try to connect
+                infra.logger.Info("Found bootstrap nodes during retry", "count", len(bootstrapNodes))
+                if err := bootstrapNetwork(retryCtx, infra.host, infra.dht, infra.getBootstrapNodes, infra.logger); err != nil {
+                    infra.logger.Warn("Bootstrap retry failed", "error", err.Error())
+                    continue
+                }
+
+                // Bootstrap succeeded
+                infra.logger.Info("Bootstrap retry successful")
+                time.Sleep(1 * time.Second) // Give DHT a moment to settle
+                return
+            }
+        }
+    }()
 }
 ```
 
-#### ❌ Incorrect Test Pattern  
+### **Network Recovery Scenarios**
+
+#### **Scenario 1: Client Starts Before Bootstrap**
+```
+Time 0s:   Client starts, tries to connect to bootstrap → FAILS
+Time 0s:   Client starts bootstrap retry loop
+Time 5s:   Client retries bootstrap → FAILS (bootstrap not running)
+Time 10s:  Bootstrap node starts
+Time 15s:  Client retries bootstrap → SUCCESS
+Time 15s:  Client becomes ready, stops retry loop
+```
+
+#### **Scenario 2: Bootstrap Node Failover**
+```
+Time 0s:   Node0 (bootstrap) + Node1 start → SUCCESS
+Time 30s:  Node0 goes down → Node1 loses all peers
+Time 30s:  Node1 becomes not ready, starts bootstrap retry
+Time 35s:  Node2 starts as new bootstrap
+Time 40s:  Node1 retries, connects to Node2 → SUCCESS
+Time 40s:  Node1 becomes ready, stops retry loop
+```
+
+#### **Scenario 3: Network Partition Recovery**
+```
+Time 0s:   All nodes connected and communicating
+Time 30s:  Network partition occurs → all nodes lose peers
+Time 30s:  All nodes become not ready, start bootstrap retry
+Time 35s:  Network partition resolves
+Time 40s:  Nodes retry bootstrap → SUCCESS
+Time 40s:  All nodes become ready, stop retry loops
+```
+
+### **Resource Management**
+
+#### **Goroutine Lifecycle Management**
+- **Retry Goroutine**: Started when node becomes not ready
+- **Automatic Cleanup**: Goroutine stops when node becomes ready
+- **Shutdown Safety**: All retry operations cancelled during shutdown
+- **Race Condition Protection**: Mutex-protected retry state management
+
+#### **Context Management**
 ```go
-func TestMessageDelivery(t *testing.T) {
-    // Single node - CANNOT verify message delivery
-    node := setupNode(t, config)
+// Shutdown context for proper cleanup
+shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+
+// Retry context combines parent and shutdown contexts
+retryCtx, cancel := context.WithCancel(parentCtx)
+
+// Cleanup on disconnect
+func (db *DB) Disconnect(ctx context.Context) error {
+    // Cancel shutdown context first to stop all retry operations immediately
+    if db.infrastructure.shutdownCancel != nil {
+        db.infrastructure.shutdownCancel()
+    }
     
-    node.Subscribe(ctx, "test-topic", handler)
-    node.Publish(ctx, "test-topic", message)
+    // Stop bootstrap retry
+    db.infrastructure.stopBootstrapRetry()
     
-    // This will ALWAYS fail - nodes never receive own messages
-    verifyMessageReceived(t, receivedMessages) // Will be empty
+    // ... rest of cleanup
 }
 ```
 
-#### Test Architecture Recommendations
+### **Performance Characteristics**
 
-**Integration Test Pattern**:
+#### **Retry Timing**
+- **Initial Retry Delay**: 2 seconds (avoid immediate reconnection attempts)
+- **Retry Interval**: 5 seconds (balance between responsiveness and resource usage)
+- **Connection Timeout**: 30 seconds per bootstrap attempt
+- **DHT Settlement Time**: 1 second after successful bootstrap
+
+#### **Resource Usage**
+- **Memory**: Minimal (single goroutine per node)
+- **CPU**: Low (5-second intervals)
+- **Network**: Only during retry attempts
+- **Concurrent Retries**: Prevented (only one retry goroutine per node)
+
+### **Integration with Registry**
+
+#### **Dynamic Bootstrap Discovery**
 ```go
-// Use multiple nodes to simulate real network conditions
-nodes := []struct{
-    id   string
-    role string
-}{
-    {"bootstrap", "message receiver"},
-    {"client1", "message sender"},  
-    {"client2", "message sender"},
+// Registry can return different bootstrap nodes over time
+func (node *DePINNode) GetBootstrapNodes(ctx context.Context) ([]common.BootstrapNode, error) {
+    // Query smart contract for current bootstrap nodes
+    // This can change as nodes join/leave the network
+    return node.registry.GetBootstrapNodes(ctx)
 }
-
-// Each test should verify:
-// 1. Messages sent by node A are received by nodes B, C
-// 2. Messages sent by node B are received by nodes A, C  
-// 3. Messages sent by node C are received by nodes A, B
-// 4. No node receives its own messages
 ```
 
-**Topic Isolation Testing**:
+#### **Failover Support**
 ```go
-// Multi-node, multi-topic verification
-func TestTopicIsolation(t *testing.T) {
-    node1.Subscribe(ctx, "topic-a", handlerA)
-    node2.Subscribe(ctx, "topic-b", handlerB)
-    node3.Subscribe(ctx, "topic-a", handlerA) // Same topic as node1
-    
-    // Verify topic isolation across nodes
-    node1.Publish(ctx, "topic-a", messageA)  // Should reach node3, not node2
-    node2.Publish(ctx, "topic-b", messageB)  // Should not reach node1 or node3
+// Multiple bootstrap nodes for redundancy
+bootstrapNodes := []common.BootstrapNode{
+    {PublicKey: node0Key, IP: "primary.example.com", QUICPort: 4001, TCPPort: 4002},
+    {PublicKey: node1Key, IP: "backup.example.com", QUICPort: 4001, TCPPort: 4002},
+    {PublicKey: node2Key, IP: "secondary.example.com", QUICPort: 4001, TCPPort: 4002},
 }
+```
+
+### **Monitoring and Observability**
+
+#### **Key Metrics**
+- **Node Readiness**: `isReady` boolean state
+- **Peer Count**: Number of connected peers
+- **Bootstrap Retries**: Count of retry attempts
+- **Retry Duration**: Time from not ready to ready
+- **Bootstrap Success Rate**: Successful vs failed attempts
+
+#### **Logging Strategy**
+```go
+// Readiness state changes
+infra.logger.Info("Node became ready", "peer_count", peerCount)
+infra.logger.Info("Node no longer ready", "peer_count", peerCount)
+
+// Retry operations
+infra.logger.Info("Starting bootstrap retry loop (every 5 seconds)")
+infra.logger.Info("Found bootstrap nodes during retry", "count", len(bootstrapNodes))
+infra.logger.Info("Bootstrap retry successful")
+infra.logger.Info("Node is ready, stopping bootstrap retry")
 ```
 
 ---
