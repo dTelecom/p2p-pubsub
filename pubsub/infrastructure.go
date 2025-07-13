@@ -344,7 +344,7 @@ func bootstrapNetwork(ctx context.Context, host host.Host, dht *dual.DHT, getBoo
 	return nil
 }
 
-// bootstrapNetworkWithRetry starts bootstrap process with retry support for empty bootstrap node lists
+// bootstrapNetworkWithRetry starts bootstrap process with retry support for empty bootstrap node lists and bootstrap failures
 func bootstrapNetworkWithRetry(ctx context.Context, infra *P2PInfrastructure) error {
 	// Check bootstrap nodes availability first
 	bootstrapNodes, err := infra.getBootstrapNodes(ctx)
@@ -362,8 +362,10 @@ func bootstrapNetworkWithRetry(ctx context.Context, infra *P2PInfrastructure) er
 	// Bootstrap nodes are available, try normal bootstrap
 	err = bootstrapNetwork(ctx, infra.host, infra.dht, infra.getBootstrapNodes, infra.logger)
 	if err != nil {
-		// Bootstrap failed, but we had nodes - this is a real error
-		return err
+		// Bootstrap failed, start retry process to keep trying
+		infra.logger.Warn("Initial bootstrap failed, starting retry process", "error", err.Error())
+		infra.startBootstrapRetry(infra.shutdownCtx)
+		return nil // Don't return error, we'll retry
 	}
 
 	// Bootstrap succeeded

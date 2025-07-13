@@ -1963,3 +1963,137 @@ func (l *TestLogger) DebugEnabled() bool {
 	// Return false since we don't show debug messages by default in tests
 	return false
 }
+
+// TestClientStartsBeforeBootstrap tests the scenario where a client node starts
+// before the bootstrap node is running, and should automatically connect when
+// the bootstrap node comes online later
+func TestClientStartsBeforeBootstrap(t *testing.T) {
+	t.Log("=== Testing Client Starts Before Bootstrap Scenario ===")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	logger := &TestLogger{}
+
+	// Phase 1: Start client node first - bootstrap node is not running yet
+	t.Log("Phase 1: Starting client node before bootstrap node...")
+
+	// Client node tries to connect to bootstrap node at ports 16001/16002, but no bootstrap node is running
+	clientDB := setupNode(t, ctx, logger, node1PrivateKey, "client-before-bootstrap-test", 16003, 16004,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForClients("127.0.0.1", 16001, 16002))
+	defer func() { _ = clientDB.Disconnect(ctx) }()
+
+	// Verify client is not ready (has no peers)
+	if clientDB.IsReady() {
+		t.Error("Client should not be ready initially (no bootstrap node running)")
+	}
+
+	// Wait a bit to ensure initial bootstrap attempt fails and retry starts
+	time.Sleep(6 * time.Second)
+
+	// Client should still not be ready
+	if clientDB.IsReady() {
+		t.Error("Client should still not be ready (bootstrap node not running)")
+	}
+
+	// Phase 2: Start bootstrap node - client should automatically connect
+	t.Log("Phase 2: Starting bootstrap node - client should automatically connect...")
+
+	bootstrapDB := setupNode(t, ctx, logger, node0PrivateKey, "client-before-bootstrap-test", 16001, 16002,
+		mockGetAuthorizedWallets, mockGetBootstrapNodesForBootstrap)
+	defer func() { _ = bootstrapDB.Disconnect(ctx) }()
+
+	// Wait for bootstrap node to be ready
+	time.Sleep(2 * time.Second)
+
+	// Wait for client to discover and connect to bootstrap node via retry mechanism
+	t.Log("Waiting for client to discover bootstrap node...")
+	connected := false
+	for i := 0; i < 20; i++ { // Wait up to 20 seconds
+		if clientDB.IsReady() {
+			connected = true
+			t.Log("Client successfully connected to bootstrap node!")
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	if !connected {
+		t.Error("Client failed to connect to bootstrap node after it came online")
+	}
+
+	// Phase 3: Test communication between nodes
+	t.Log("Phase 3: Testing communication between nodes...")
+
+	testTopic := "client-before-bootstrap-topic"
+
+	// Set up message handlers
+	var (
+		clientReceived    []string
+		bootstrapReceived []string
+		mu                sync.RWMutex
+	)
+
+	clientHandler := func(event common.Event) {
+		mu.Lock()
+		clientReceived = append(clientReceived, fmt.Sprintf("%v", event.Message))
+		mu.Unlock()
+	}
+
+	bootstrapHandler := func(event common.Event) {
+		mu.Lock()
+		bootstrapReceived = append(bootstrapReceived, fmt.Sprintf("%v", event.Message))
+		mu.Unlock()
+	}
+
+	// Subscribe both nodes
+	err := clientDB.Subscribe(ctx, testTopic, clientHandler)
+	if err != nil {
+		t.Fatalf("Failed to subscribe client: %v", err)
+	}
+
+	err = bootstrapDB.Subscribe(ctx, testTopic, bootstrapHandler)
+	if err != nil {
+		t.Fatalf("Failed to subscribe bootstrap: %v", err)
+	}
+
+	// Wait for subscriptions to propagate
+	time.Sleep(2 * time.Second)
+
+	// Test bidirectional communication
+	clientMsg := map[string]interface{}{"from": "client", "message": "Hello from client"}
+	bootstrapMsg := map[string]interface{}{"from": "bootstrap", "message": "Hello from bootstrap"}
+
+	// Client publishes to bootstrap
+	_, err = clientDB.Publish(ctx, testTopic, clientMsg)
+	if err != nil {
+		t.Fatalf("Failed to publish from client: %v", err)
+	}
+
+	// Bootstrap publishes to client
+	_, err = bootstrapDB.Publish(ctx, testTopic, bootstrapMsg)
+	if err != nil {
+		t.Fatalf("Failed to publish from bootstrap: %v", err)
+	}
+
+	// Wait for message propagation
+	time.Sleep(5 * time.Second)
+
+	// Verify messages were received
+	mu.RLock()
+	defer mu.RUnlock()
+
+	if len(clientReceived) == 0 {
+		t.Error("Client did not receive any messages")
+	} else {
+		t.Logf("Client received %d messages", len(clientReceived))
+	}
+
+	if len(bootstrapReceived) == 0 {
+		t.Error("Bootstrap did not receive any messages")
+	} else {
+		t.Logf("Bootstrap received %d messages", len(bootstrapReceived))
+	}
+
+	t.Log("=== Client Starts Before Bootstrap Test Complete ===")
+}
