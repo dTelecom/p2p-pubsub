@@ -2382,3 +2382,186 @@ func TestAllNodesBootstrapAndAuthorized(t *testing.T) {
 	t.Log("  - Network shows resilience to node disconnections")
 	t.Log("  - Self-information as bootstrap/authorized works correctly")
 }
+
+// TestAuthorizationCacheRefresh tests that new nodes can connect after being added to the authorized list
+func TestAuthorizationCacheRefresh(t *testing.T) {
+	t.Log("=== Starting Authorization Cache Refresh Test ===")
+
+	// Test configuration
+	testTopic := "cache-refresh-topic"
+	refreshInterval := 2 * time.Second // Short interval for testing
+	messageTimeout := 10 * time.Second
+
+	// Create logger
+	logger := &TestLogger{}
+
+	// Setup context
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Initially, only nodes 0 and 1 are authorized
+	initialAuthorizedWallets := []solana.PublicKey{
+		solana.MustPublicKeyFromBase58(node0PublicKey),
+		solana.MustPublicKeyFromBase58(node1PublicKey),
+	}
+
+	// Create a mock registry function that can be updated
+	var authorizedWallets []solana.PublicKey
+	var authorizedMutex sync.RWMutex
+
+	mockGetAuthorizedWallets := func(ctx context.Context) ([]solana.PublicKey, error) {
+		authorizedMutex.RLock()
+		defer authorizedMutex.RUnlock()
+		return authorizedWallets, nil
+	}
+
+	// Set initial authorized wallets
+	authorizedMutex.Lock()
+	authorizedWallets = initialAuthorizedWallets
+	authorizedMutex.Unlock()
+
+	// Node 0 (Bootstrap and authorized)
+	node0Config := common.Config{
+		WalletPrivateKey:     node0PrivateKey,
+		DatabaseName:         "cache-refresh-network",
+		GetAuthorizedWallets: mockGetAuthorizedWallets,
+		GetBootstrapNodes:    mockGetBootstrapNodesForBootstrap,
+		Logger:               logger,
+		RefreshInterval:      refreshInterval,
+		ListenPorts: common.ListenPorts{
+			QUIC: 16001,
+			TCP:  16002,
+		},
+	}
+
+	node0DB, err := pubsub.Connect(ctx, node0Config)
+	if err != nil {
+		t.Fatalf("Failed to connect Node 0: %v", err)
+	}
+	defer func() { _ = node0DB.Disconnect(ctx) }()
+
+	// Subscribe node 0 to topic
+	err = node0DB.Subscribe(ctx, testTopic, func(event common.Event) {
+		t.Logf("Node 0 received message: %s", event.ID)
+	})
+	if err != nil {
+		t.Fatalf("Failed to subscribe Node 0: %v", err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// Node 1 (Client and authorized)
+	node1Config := common.Config{
+		WalletPrivateKey:     node1PrivateKey,
+		DatabaseName:         "cache-refresh-network",
+		GetAuthorizedWallets: mockGetAuthorizedWallets,
+		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", 16001, 16002),
+		Logger:               logger,
+		RefreshInterval:      refreshInterval,
+		ListenPorts: common.ListenPorts{
+			QUIC: 16003,
+			TCP:  16004,
+		},
+	}
+
+	node1DB, err := pubsub.Connect(ctx, node1Config)
+	if err != nil {
+		t.Fatalf("Failed to connect Node 1: %v", err)
+	}
+	defer func() { _ = node1DB.Disconnect(ctx) }()
+
+	// Subscribe node 1 to topic
+	err = node1DB.Subscribe(ctx, testTopic, func(event common.Event) {
+		t.Logf("Node 1 received message: %s", event.ID)
+	})
+	if err != nil {
+		t.Fatalf("Failed to subscribe Node 1: %v", err)
+	}
+
+	// Wait for initial network setup
+	time.Sleep(5 * time.Second)
+
+	// Verify initial connectivity - nodes 0 and 1 should be connected
+	if !node0DB.IsReady() {
+		t.Fatal("Node 0 should be ready after initial setup")
+	}
+	if !node1DB.IsReady() {
+		t.Fatal("Node 1 should be ready after initial setup")
+	}
+
+	t.Log("Initial network setup complete - nodes 0 and 1 are connected")
+
+	// Now add node 2 to the authorized list
+	authorizedMutex.Lock()
+	authorizedWallets = append(authorizedWallets, solana.MustPublicKeyFromBase58(node2PublicKey))
+	authorizedMutex.Unlock()
+
+	t.Log("Added node 2 to authorized list")
+
+	// Wait for cache refresh (refresh interval + buffer)
+	time.Sleep(refreshInterval + 1*time.Second)
+
+	// Now try to connect node 2
+	node2Config := common.Config{
+		WalletPrivateKey:     node2PrivateKey,
+		DatabaseName:         "cache-refresh-network",
+		GetAuthorizedWallets: mockGetAuthorizedWallets,
+		GetBootstrapNodes:    mockGetBootstrapNodesForClients("127.0.0.1", 16001, 16002),
+		Logger:               logger,
+		RefreshInterval:      refreshInterval,
+		ListenPorts: common.ListenPorts{
+			QUIC: 16005,
+			TCP:  16006,
+		},
+	}
+
+	node2DB, err := pubsub.Connect(ctx, node2Config)
+	if err != nil {
+		t.Fatalf("Failed to connect Node 2: %v", err)
+	}
+	defer func() { _ = node2DB.Disconnect(ctx) }()
+
+	// Subscribe node 2 to topic
+	err = node2DB.Subscribe(ctx, testTopic, func(event common.Event) {
+		t.Logf("Node 2 received message: %s", event.ID)
+	})
+	if err != nil {
+		t.Fatalf("Failed to subscribe Node 2: %v", err)
+	}
+
+	// Wait for node 2 to connect
+	time.Sleep(5 * time.Second)
+
+	// Verify all nodes are connected
+	if !node0DB.IsReady() {
+		t.Fatal("Node 0 should still be ready")
+	}
+	if !node1DB.IsReady() {
+		t.Fatal("Node 1 should still be ready")
+	}
+	if !node2DB.IsReady() {
+		t.Fatal("Node 2 should be ready after being added to authorized list")
+	}
+
+	t.Log("All nodes are connected after cache refresh")
+
+	// Test message propagation between all nodes
+	message := NodeMessage{
+		NodeID:  "node-2",
+		Content: "Hello from newly authorized Node 2",
+		Counter: 1,
+	}
+
+	// Publish from node 2
+	event, err := node2DB.Publish(ctx, testTopic, message)
+	if err != nil {
+		t.Fatalf("Failed to publish from Node 2: %v", err)
+	}
+	t.Logf("Node 2 published message: %s", event.ID)
+
+	// Wait for message propagation
+	time.Sleep(messageTimeout)
+
+	// Verify that all nodes can communicate
+	t.Log("Authorization cache refresh test completed successfully")
+}

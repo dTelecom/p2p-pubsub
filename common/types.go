@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"time"
 
 	"github.com/gagliardetto/solana-go"
 )
@@ -14,6 +15,7 @@ type Config struct {
 	GetBootstrapNodes    GetBootstrapNodesFunc    // Function to get bootstrap nodes
 	Logger               Logger                   // Logger for all internal operations
 	ListenPorts          ListenPorts              // Ports for different transports
+	RefreshInterval      time.Duration            // How often to refresh authorized wallets cache (default: 30s)
 }
 
 // Function provided by node software to get authorized wallets

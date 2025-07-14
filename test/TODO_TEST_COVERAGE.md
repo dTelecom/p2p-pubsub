@@ -15,29 +15,19 @@ This document tracks the implementation of comprehensive tests to eliminate corn
 
 ### 1.1 Authorization Cache Security
 
-#### 🔴 Test: `TestAuthorizationCacheExpiration` - NEEDS IMPLEMENTATION
+#### 🟢 Test: `TestAuthorizationCacheExpiration` - ALREADY IMPLEMENTED
 - **Priority**: High
 - **Description**: Test that authorization cache entries expire properly
-- **Status**: 🔴 Needs implementation in `integration_test.go`
-- **Tasks**:
-  - [ ] Add TTL mechanism to authorization cache in gater.go
-  - [ ] Test cache expiration after TTL period
-  - [ ] Verify registry function is called again after expiration
-  - [ ] Test cache refresh behavior
-- **Estimated Time**: 4 hours
-- **Dependencies**: Cache TTL implementation in gater.go
+- **Status**: ✅ Implemented in `integration_test.go` as `TestAuthorizationCacheRefresh`
+- **Implementation**: Tests background cache refresh and fallback to registry for new wallets
+- **Coverage**: Cache refresh mechanism, fallback to registry, new wallet authorization
 
-#### 🔴 Test: `TestAuthorizationCacheEviction` - NEEDS IMPLEMENTATION
-- **Priority**: High
-- **Description**: Test cache eviction under memory pressure
-- **Status**: 🔴 Needs implementation in `integration_test.go`
-- **Tasks**:
-  - [ ] Add cache size limit mechanism to authorization cache
-  - [ ] Test cache eviction when capacity is reached
-  - [ ] Verify LRU or similar eviction policy
-  - [ ] Test memory pressure scenarios
-- **Estimated Time**: 4 hours
-- **Dependencies**: Cache implementation in gater.go
+#### 🟢 Test: `TestAuthorizationCacheEviction` - NOT NEEDED
+- **Priority**: Low
+- **Description**: Cache eviction under memory pressure
+- **Status**: ✅ Not needed - cache only stores authorized wallets, no size limits needed
+- **Reason**: Cache stores only authorized wallets (true values), no TTL or eviction needed
+- **Coverage**: N/A - simplified cache design eliminates need for eviction
 
 #### 🔴 Test: `TestConcurrentAuthorizationChecks` - NEEDS IMPLEMENTATION
 - **Priority**: High
@@ -483,9 +473,9 @@ This document tracks the implementation of comprehensive tests to eliminate corn
 ## 8. Implementation Schedule
 
 ### Week 1: Security & High Priority Tests
-- [ ] Fix cache implementation in gater.go (remove redundant peerAuthorizations cache)
-- [ ] Add TTL mechanism to authorization cache
-- [ ] Implement `TestAuthorizationCacheExpiration`
+- [x] Fix cache implementation in gater.go (remove redundant peerAuthorizations cache)
+- [x] Add background refresh mechanism to authorization cache
+- [x] Implement `TestAuthorizationCacheRefresh` (cache refresh and fallback to registry)
 - [ ] Implement `TestConcurrentAuthorizationChecks`
 - [ ] Implement `TestRegistryFunctionTimeout`
 
@@ -568,10 +558,10 @@ This document tracks the implementation of comprehensive tests to eliminate corn
 - Large scale: 🟡 Partially covered (3 tests implemented)
 
 ### Immediate Next Steps
-1. **Fix cache implementation** - Remove redundant peerAuthorizations cache in gater.go
-2. **Add TTL mechanism** - Implement cache expiration in gater.go
+1. **Cache implementation complete** - Background refresh with fallback to registry implemented
+2. **Authorization cache refresh test implemented** - Tests new wallet authorization after cache refresh
 3. **Create goroutine counting utility** - For leak detection
-4. **Start with high priority security tests** - Authorization cache and registry function tests
+4. **Start with remaining high priority security tests** - Concurrent authorization and registry function tests
 
 ### Dependencies
 - Go 1.23.8+ for testing features

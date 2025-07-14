@@ -8,7 +8,7 @@ GOMOD=$(GOCMD) mod
 GOFMT=$(GOCMD) fmt
 GOVET=$(GOCMD) vet
 
-.PHONY: all clean test test-verbose deps fmt check check-basic check-enhanced install-linters help
+.PHONY: all clean test test-verbose test-coverage test-race test-race-verbose deps fmt check check-basic check-enhanced install-linters help
 
 # Default target
 all: clean deps fmt check test
@@ -21,8 +21,12 @@ clean:
 clean-test:
 	$(GOCLEAN) -testcache
 
-# Run tests
+# Run tests (quiet by default)
 test:
+	$(GOTEST) ./...
+
+# Run tests with verbose output
+test-verbose:
 	$(GOTEST) -v ./...
 
 # Run tests with coverage
@@ -30,9 +34,13 @@ test-coverage:
 	$(GOTEST) -v -coverprofile=coverage.out ./...
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 
-# Run tests with race detection
+# Run tests with race detection (quiet)
 test-race:
 	$(GOTEST) -race ./...
+
+# Run tests with race detection and verbose output
+test-race-verbose:
+	$(GOTEST) -race -v ./...
 
 # Install/update dependencies
 deps:
@@ -120,9 +128,11 @@ help:
 	@echo "  all              - Clean, deps, fmt, check, and test"
 	@echo "  clean            - Clean build artifacts"
 	@echo "  clean-test       - Clean test cache"
-	@echo "  test             - Run tests"
+	@echo "  test             - Run tests (quiet output)"
+	@echo "  test-verbose     - Run tests with verbose output"
 	@echo "  test-coverage    - Run tests with coverage report"
-	@echo "  test-race        - Run tests with race detection"
+	@echo "  test-race        - Run tests with race detection (quiet)"
+	@echo "  test-race-verbose - Run tests with race detection and verbose output"
 	@echo "  deps             - Download and tidy dependencies"
 	@echo "  fmt              - Format code"
 	@echo "  check            - Run all code quality checks"

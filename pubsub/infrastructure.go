@@ -162,7 +162,11 @@ func initializeP2PInfrastructure(config common.Config) (*P2PInfrastructure, erro
 	}
 
 	// Create registry-based connection gater
-	gater := common.NewSolanaRegistryGater(config.GetAuthorizedWallets, config.Logger)
+	refreshInterval := config.RefreshInterval
+	if refreshInterval == 0 {
+		refreshInterval = 30 * time.Second // Default to 30 seconds
+	}
+	gater := common.NewSolanaRegistryGater(config.GetAuthorizedWallets, config.Logger, refreshInterval)
 
 	config.Logger.Info("Creating libp2p host",
 		"quic_port", config.ListenPorts.QUIC,

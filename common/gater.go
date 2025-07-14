@@ -17,22 +17,90 @@ import (
 type SolanaRegistryGater struct {
 	getAuthorizedWallets GetAuthorizedWalletsFunc // Function provided by node software
 	logger               Logger                   // Logger instance
-	cache                *AuthorizationCache      // Wallet authorization cache for performance
+	cache                *AuthorizationCache      // Authorized wallets cache
+	refreshInterval      time.Duration            // How often to refresh the authorized wallets list
+	ctx                  context.Context          // Context for the refresh goroutine
+	cancel               context.CancelFunc       // Cancel function for the refresh goroutine
+	wg                   sync.WaitGroup           // Wait group for the refresh goroutine
 }
 
-// AuthorizationCache provides simple caching for wallet authorization
+// AuthorizationCache provides caching for authorized wallets
 type AuthorizationCache struct {
-	walletAuthorizations sync.Map // solana.PublicKey -> bool
-	mutex                sync.RWMutex
+	authorizedWallets sync.Map // solana.PublicKey -> bool (only true values are stored)
+	mutex             sync.RWMutex
 }
 
 // NewSolanaRegistryGater creates a new connection gater with the provided registry function
-func NewSolanaRegistryGater(getAuthorizedWallets GetAuthorizedWalletsFunc, logger Logger) *SolanaRegistryGater {
-	return &SolanaRegistryGater{
+func NewSolanaRegistryGater(getAuthorizedWallets GetAuthorizedWalletsFunc, logger Logger, refreshInterval time.Duration) *SolanaRegistryGater {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	gater := &SolanaRegistryGater{
 		getAuthorizedWallets: getAuthorizedWallets,
 		logger:               logger,
 		cache:                &AuthorizationCache{},
+		refreshInterval:      refreshInterval,
+		ctx:                  ctx,
+		cancel:               cancel,
 	}
+
+	// Start the background refresh process
+	gater.wg.Add(1)
+	go gater.refreshAuthorizedWallets()
+
+	return gater
+}
+
+// refreshAuthorizedWallets runs in a background goroutine and refreshes the authorized wallets list
+func (g *SolanaRegistryGater) refreshAuthorizedWallets() {
+	defer g.wg.Done()
+
+	// Initial refresh
+	g.refreshCache()
+
+	ticker := time.NewTicker(g.refreshInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-g.ctx.Done():
+			g.logger.Info("Stopping authorized wallets refresh process")
+			return
+		case <-ticker.C:
+			g.refreshCache()
+		}
+	}
+}
+
+// refreshCache fetches the current authorized wallets and updates the cache
+func (g *SolanaRegistryGater) refreshCache() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	authorizedWallets, err := g.getAuthorizedWallets(ctx)
+	if err != nil {
+		g.logger.Warn("Failed to refresh authorized wallets cache",
+			"error", err.Error())
+		return
+	}
+
+	// Clear existing cache and populate with new authorized wallets
+	g.cache.mutex.Lock()
+	g.cache.authorizedWallets = sync.Map{}
+
+	for _, wallet := range authorizedWallets {
+		g.cache.authorizedWallets.Store(wallet, true)
+	}
+	g.cache.mutex.Unlock()
+
+	g.logger.Debug("Refreshed authorized wallets cache",
+		"authorized_wallets_count", len(authorizedWallets))
+}
+
+// Stop stops the background refresh process
+func (g *SolanaRegistryGater) Stop() {
+	g.cancel()
+	g.wg.Wait()
+	g.logger.Info("SolanaRegistryGater stopped")
 }
 
 // InterceptPeerDial validates outgoing connections against registry
@@ -105,7 +173,7 @@ func (g *SolanaRegistryGater) InterceptUpgraded(network.Conn) (allow bool, reaso
 	return true, 0
 }
 
-// isAuthorizedPeer checks if a peer is authorized by looking up its wallet in the registry
+// isAuthorizedPeer checks if a peer is authorized by looking up its wallet in the cache
 func (g *SolanaRegistryGater) isAuthorizedPeer(ctx context.Context, peerID peer.ID) (bool, error) {
 	// Extract Solana public key from peer ID
 	solanaPublicKey, err := PeerIDToSolanaPublicKey(peerID)
@@ -116,13 +184,13 @@ func (g *SolanaRegistryGater) isAuthorizedPeer(ctx context.Context, peerID peer.
 		return false, err
 	}
 
-	// Check wallet authorization (this will use the wallet cache)
-	authorized, err := g.checkWalletInRegistry(ctx, solanaPublicKey)
+	// Check wallet authorization using the cache
+	authorized, err := g.checkWalletInCache(ctx, solanaPublicKey)
 	if err != nil {
-		return false, fmt.Errorf("failed to check wallet in registry: %w", err)
+		return false, fmt.Errorf("failed to check wallet in cache: %w", err)
 	}
 
-	g.logger.Debug("Checked peer authorization against registry",
+	g.logger.Debug("Checked peer authorization against cache",
 		"peer_id", peerID.String(),
 		"wallet", solanaPublicKey.String(),
 		"authorized", authorized)
@@ -130,20 +198,22 @@ func (g *SolanaRegistryGater) isAuthorizedPeer(ctx context.Context, peerID peer.
 	return authorized, nil
 }
 
-// checkWalletInRegistry validates a wallet against the registry using the provided function
-func (g *SolanaRegistryGater) checkWalletInRegistry(ctx context.Context, wallet solana.PublicKey) (bool, error) {
+// checkWalletInCache checks if a wallet is authorized by looking it up in the cache
+func (g *SolanaRegistryGater) checkWalletInCache(ctx context.Context, wallet solana.PublicKey) (bool, error) {
 	// Check cache first
-	if cached, found := g.cache.walletAuthorizations.Load(wallet); found {
-		g.logger.Debug("Found cached wallet authorization",
-			"wallet", wallet.String(),
-			"authorized", cached.(bool))
-		return cached.(bool), nil
+	if _, found := g.cache.authorizedWallets.Load(wallet); found {
+		g.logger.Debug("Found wallet in authorized cache",
+			"wallet", wallet.String())
+		return true, nil
 	}
 
-	// Get authorized wallets from registry
+	// If not in cache, check registry directly (fallback for new wallets)
+	g.logger.Debug("Wallet not found in cache, checking registry",
+		"wallet", wallet.String())
+
 	authorizedWallets, err := g.getAuthorizedWallets(ctx)
 	if err != nil {
-		return false, fmt.Errorf("failed to get authorized wallets: %w", err)
+		return false, fmt.Errorf("failed to get authorized wallets from registry: %w", err)
 	}
 
 	// Check if wallet is in the authorized list
@@ -155,8 +225,12 @@ func (g *SolanaRegistryGater) checkWalletInRegistry(ctx context.Context, wallet 
 		}
 	}
 
-	// Cache the result
-	g.cache.walletAuthorizations.Store(wallet, authorized)
+	// If authorized, add to cache for future lookups
+	if authorized {
+		g.cache.authorizedWallets.Store(wallet, true)
+		g.logger.Debug("Added wallet to cache after registry check",
+			"wallet", wallet.String())
+	}
 
 	g.logger.Debug("Checked wallet authorization against registry",
 		"wallet", wallet.String(),
@@ -166,11 +240,11 @@ func (g *SolanaRegistryGater) checkWalletInRegistry(ctx context.Context, wallet 
 	return authorized, nil
 }
 
-// ClearCache clears the authorization cache (useful for testing or manual refresh)
+// ClearCache clears the authorization cache (useful for testing)
 func (g *SolanaRegistryGater) ClearCache() {
 	g.cache.mutex.Lock()
 	defer g.cache.mutex.Unlock()
 
-	g.cache.walletAuthorizations = sync.Map{}
+	g.cache.authorizedWallets = sync.Map{}
 	g.logger.Debug("Cleared authorization cache")
 }
