@@ -880,6 +880,44 @@ func (l *LogrusLogger) Info(msg string, keysAndValues ...interface{}) {
 }
 ```
 
+#### LiveKit Logger Adapter
+
+For projects using LiveKit loggers with methods like `Debugw`, `Infow`, `Warnw`, `Errorw`, use the built-in adapter:
+
+```go
+import "github.com/livekit/protocol/logger"
+
+// Assuming you have a LiveKit logger instance
+livekitLogger := logger.GetLogger() // or your LiveKit logger instance
+
+// Create adapter
+pubsubLogger := common.NewLivekitLoggerAdapter(livekitLogger)
+
+// Use in config
+config := Config{
+    WalletPrivateKey:     "your-wallet-key",
+    DatabaseName:         "depin-network",
+    GetAuthorizedWallets: node.GetAuthorizedWallets,
+    GetBootstrapNodes:    node.GetBootstrapNodes,
+    Logger:               pubsubLogger,
+    ListenPorts: ListenPorts{
+        QUIC: 4001,
+        TCP:  4002,
+    },
+}
+```
+
+The LiveKitLogger interface required by `NewLivekitLoggerAdapter` is:
+
+```go
+type LiveKitLogger interface {
+    Debugw(msg string, keysAndValues ...interface{})
+    Infow(msg string, keysAndValues ...interface{})
+    Warnw(msg string, err error, keysAndValues ...interface{})
+    Errorw(msg string, err error, keysAndValues ...interface{})
+}
+```
+
 **Recommendation**: Use Go's standard `slog` package for new projects as it provides excellent performance, structured logging, and is part of the standard library since Go 1.21.
 
 ## Error Handling & Resilience for DePIN
