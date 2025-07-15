@@ -1,6 +1,8 @@
 module github.com/dtelecom/p2p-pubsub
 
-go 1.23.8
+go 1.23.5
+
+toolchain go1.23.6
 
 require (
 	github.com/gagliardetto/solana-go v1.12.0 // Solana integration
