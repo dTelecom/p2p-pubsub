@@ -565,7 +565,7 @@ This document tracks the implementation of comprehensive tests to eliminate corn
 
 ### Dependencies
 - Go 1.23.8+ for testing features
-- libp2p v0.42.0 for network functionality
+- libp2p v0.41.1 for network functionality
 - Runtime package for resource monitoring
 - Testing package for benchmarks
 

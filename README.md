@@ -900,7 +900,7 @@ See [`examples/simple-node/README.md`](examples/simple-node/README.md) for detai
 ### **Current Version**
 - **Library Version**: 1.0.0
 - **Go Version**: 1.23.11+
-- **libp2p Version**: v0.42.0
+- **libp2p Version**: v0.41.1
 - **Solana Integration**: v1.12.0
 
 ### **Recent Changes**
@@ -931,7 +931,7 @@ See [`examples/simple-node/README.md`](examples/simple-node/README.md) for detai
 
 #### **Dependencies**
 - **Go**: 1.23.11 or later
-- **libp2p**: v0.42.0
+- **libp2p**: v0.41.1
 - **Solana**: v1.12.0
 - **Network**: QUIC/UDP and TCP support
 

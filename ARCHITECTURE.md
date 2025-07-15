@@ -759,14 +759,13 @@ module github.com/your-org/p2p-pubsub
 go 1.23.11
 
 require (
-    github.com/libp2p/go-libp2p v0.42.0                    // Latest libp2p networking
+    github.com/libp2p/go-libp2p v0.41.1                    // Latest libp2p networking
     github.com/libp2p/go-libp2p-pubsub v0.12.0             // Latest GossipSub
     github.com/libp2p/go-libp2p-kad-dht v0.27.0            // Latest Kademlia DHT
     github.com/libp2p/go-libp2p-quic-transport v0.10.0     // QUIC transport (primary)
     github.com/libp2p/go-libp2p-circuit v0.20.0            // Circuit relay transport
     github.com/gagliardetto/solana-go v1.12.0              // Solana integration
     github.com/multiformats/go-multiaddr v0.12.0           // Multiaddress support
-    github.com/ipfs/go-datastore v0.6.0                    // Local storage
     github.com/google/uuid v1.5.0                          // Event ID generation
 )
 ```
@@ -959,7 +958,7 @@ This updated P2P distributed pub/sub system is specifically optimized for **DePI
 3. **Three-Transport Architecture**: QUIC (primary), TCP (fallback), and Circuit Relay (NAT assistance) for universal connectivity
 4. **Process-Level Resource Sharing**: Efficient infrastructure sharing across multiple database instances
 5. **Connection-Level Security**: Registry-based authorization at connection time, not per-topic
-6. **Latest Technology Stack**: Go 1.23.11, libp2p v0.42.0, solana-go v1.12.0
+6. **Latest Technology Stack**: Go 1.23.11, libp2p v0.41.1, solana-go v1.12.0
 
 ### DePIN-Specific Benefits
 - **Permissionless Participation**: Nodes automatically authorized via smart contract (handled by node software)
